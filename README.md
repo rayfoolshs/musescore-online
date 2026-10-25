@@ -36,18 +36,43 @@ The `gh-pages` branch holds the built application that the live demo serves.
 
 ## Build it yourself
 
-Upstream sources are public, so the patches are all you need.
+Upstream sources are public, so the patches are all you need. Everything is pinned — the
+patches apply to these exact revisions (verified by rebuilding from a fresh clone):
+
+| Component | Version / revision |
+|---|---|
+| `musescore/MuseScore` | `9203eb3a37f11b90e70abfaee4f66406ee25e7c8` |
+| `musescore/muse_framework` (`muse/`) | `3e0eae57a9aa3dedb0a1e1d05d3ebf0cbc1b5e36` |
+| `musescore/muse_deps` | `bf433c8f4f6f9d9897aa78d9fddcb2bbd02e42dc` |
+| Qt | 6.11.2 — `wasm_singlethread` + host desktop |
+| Emscripten | 4.0.7 |
+| CMake / Ninja | 4.4.4 / 1.13.2 |
+
+The fastest path (clones the pinned upstream, checks out the right submodule commits, applies
+all patches and drops the build scripts in place):
 
 ```bash
-# 1. Upstream + submodules
-git clone --depth 1 https://github.com/musescore/MuseScore.git
+./scripts/fetch.sh MuseScore
 cd MuseScore
+```
+
+<details>
+<summary>…or do it by hand</summary>
+
+```bash
+# 1. Pinned upstream + submodules
+git init MuseScore && cd MuseScore
+git remote add origin https://github.com/musescore/MuseScore.git
+git fetch --depth 1 origin 9203eb3a37f11b90e70abfaee4f66406ee25e7c8
+git checkout FETCH_HEAD
 git submodule update --init --depth 1 muse muse_deps
 
 # 2. Apply the patches
 git apply /path/to/patches/0001-musescore-studio-web.patch
 git -C muse apply /path/to/patches/0002-muse-framework.patch
 git -C muse_deps apply /path/to/patches/0003-muse-deps.patch
+```
+</details>
 
 # 3. Toolchain (versions used and verified)
 #    Qt 6.11.2 wasm_singlethread + host Qt 6.11.2 (macOS), Emscripten 4.0.7
