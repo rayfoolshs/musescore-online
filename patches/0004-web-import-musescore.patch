@@ -1,0 +1,587 @@
+diff --git a/src/project/internal/openprojectscenario.h b/src/project/internal/openprojectscenario.h
+index 21ac7c5..eea2c62 100644
+--- a/src/project/internal/openprojectscenario.h
++++ b/src/project/internal/openprojectscenario.h
+@@ -79,6 +79,7 @@ public:
+     muse::async::Promise<muse::Ret> openProject(const muse::rcommand::Params& params) override;
+ 
+     muse::async::Promise<muse::Ret> revertToLastSaved() override;
++    muse::async::Promise<muse::RetVal<INotationProjectPtr> > loadProject(const muse::io::path_t& filePath) override;
+     muse::Ret finishOpening() override;
+ 
+     muse::Uri resolveNotationPageUri() const override;
+@@ -103,7 +104,6 @@ private:
+     void setBusy(BusyStatus status, bool isBusy);
+     muse::async::Promise<muse::Ret> runIfNotBusy(BusyStatus status, const std::function<muse::async::Promise<muse::Ret>()>& flow);
+ 
+-    muse::async::Promise<muse::RetVal<INotationProjectPtr> > loadProject(const muse::io::path_t& filePath);
+     muse::async::Promise<muse::Ret> loadWithFallback(const std::shared_ptr<INotationProject>& project, const muse::io::path_t& loadPath,
+                                                      const std::string& format);
+ 
+diff --git a/src/project/iopenprojectscenario.h b/src/project/iopenprojectscenario.h
+index 7a293e5..b52e8ee 100644
+--- a/src/project/iopenprojectscenario.h
++++ b/src/project/iopenprojectscenario.h
+@@ -32,6 +32,7 @@
+ 
+ #include "types/projecttypes.h"
+ #include "types/projectfile.h"
++#include "inotationproject_fwd.h"
+ 
+ namespace mu::project {
+ class IOpenProjectScenario : MODULE_CONTEXT_INTERFACE
+@@ -50,6 +51,10 @@ public:
+ 
+     virtual muse::async::Promise<muse::Ret> revertToLastSaved() = 0;
+ 
++    //! Reads a project without making it the current one. Lets a caller (the web import
++    //! flow) find out whether a file can be opened before the open score is replaced.
++    virtual muse::async::Promise<muse::RetVal<INotationProjectPtr> > loadProject(const muse::io::path_t& filePath) = 0;
++
+     virtual muse::Ret finishOpening() = 0;
+ 
+     //! The page to show the currently opened project on: the normal notation page,
+diff --git a/src/project/tests/mocks/openprojectscenariomock.h b/src/project/tests/mocks/openprojectscenariomock.h
+index c601678..9afb13f 100644
+--- a/src/project/tests/mocks/openprojectscenariomock.h
++++ b/src/project/tests/mocks/openprojectscenariomock.h
+@@ -37,6 +37,7 @@ public:
+                 (const muse::io::path_t& path, const QString& displayNameOverride), (override));
+     MOCK_METHOD(muse::async::Promise<muse::Ret>, openProject, (const muse::rcommand::Params& params), (override));
+     MOCK_METHOD(muse::async::Promise<muse::Ret>, revertToLastSaved, (), (override));
++    MOCK_METHOD((muse::async::Promise<muse::RetVal<INotationProjectPtr> >), loadProject, (const muse::io::path_t& filePath), (override));
+     MOCK_METHOD(muse::Ret, finishOpening, (), (override));
+     MOCK_METHOD(muse::Uri, resolveNotationPageUri, (), (const, override));
+     MOCK_METHOD(const ProjectBeingDownloaded&, projectBeingDownloaded, (), (const, override));
+diff --git a/src/web/appjs/appjsmodule.cpp b/src/web/appjs/appjsmodule.cpp
+index 0fbf2ec..e359029 100644
+--- a/src/web/appjs/appjsmodule.cpp
++++ b/src/web/appjs/appjsmodule.cpp
+@@ -59,6 +59,13 @@ void AppJsContext::resolveImports()
+         return;
+     }
+ 
++    cd->onRequest(this, muse::rcommand::Command("command://web/open-score"), [](const muse::rcommand::Request&) {
++        WebApi::instance()->requestOpenFile();
++        muse::rcommand::Response response;
++        response.ret = muse::make_ret(muse::Ret::Code::Ok);
++        return response;
++    });
++
+     cd->onRequest(this, muse::rcommand::Command("command://web/score-save"), [](const muse::rcommand::Request&) {
+         WebApi::instance()->saveScore();
+         muse::rcommand::Response response;
+diff --git a/src/web/appjs/distr/muapi.js b/src/web/appjs/distr/muapi.js
+index 7d983fc..6d00aea 100644
+--- a/src/web/appjs/distr/muapi.js
++++ b/src/web/appjs/distr/muapi.js
+@@ -4,10 +4,13 @@ const DEFAULT_SOUNDFONT = "sound/FluidR3Mono_GM.sf3"
+ 
+ const MuApi = {
+ 
+-    // Load score
++    // Load score (mscz/mscx, MusicXML and MIDI are supported)
+     loadScoreFile: MuImpl.loadScoreFile,
+     loadScoreData: MuImpl.loadScoreData,
+ 
++    // Open the browser's file picker for a score
++    openScorePicker: () => MuImpl.openScorePicker(),
++
+     // Save score with a user-provided file name
+     saveScoreAs: MuImpl.saveScoreAs.bind(MuImpl),
+ 
+diff --git a/src/web/appjs/distr/muimpl.js b/src/web/appjs/distr/muimpl.js
+index abfe0b2..077cf14 100644
+--- a/src/web/appjs/distr/muimpl.js
++++ b/src/web/appjs/distr/muimpl.js
+@@ -2,8 +2,50 @@ import config from "./config.js";
+ import qtLoad from "./qtloader.js";
+ import AudioDriver from "./audiodriver.js";
+ 
++const SCORE_FILETYPES = [
++    ".mscz", ".mscx",                     // MuseScore Studio projects (MuseScore 4 and older)
++    ".musicxml", ".xml", ".mxl",          // MusicXML (plain and compressed)
++    ".mid", ".midi", ".kar",              // MIDI
++];
++
++// Callbacks of the host page (viewer.html). Kept here because after qtLoad() the
++// Module's own `config` property is Qt's config, not the object passed in by the page.
++let hostConfig = {};
++
++function hostCallback(name) {
++    return typeof hostConfig[name] === "function" ? hostConfig[name] : null;
++}
++
+ function setupInternalCallbacks(Module) {
+ 
++    // Opening a score: the native side asks, the browser owns the file picker.
++    Module.onOpenScoreRequested = function() {
++        const onRequested = hostCallback("onOpenScoreRequested");
++        if (onRequested) {
++            onRequested();
++            return;
++        }
++        MuImpl.openScorePicker();
++    };
++
++    // The web build is single-window: importing replaces the open score. Native dialogs
++    // are not available, so ask here before the score (and its changes) are dropped.
++    Module.onConfirmDiscard = function(displayName) {
++        return window.confirm(
++            "“" + displayName + "” has unsaved changes.\n\n" +
++            "Discard them and open the selected file?");
++    };
++
++    Module.onImportFailed = function(fileName, message) {
++        console.error("[js] import failed: ", fileName, ", ", message);
++        const onImportFailed = hostCallback("onImportFailed");
++        if (onImportFailed) {
++            onImportFailed(fileName, message);
++        } else {
++            window.alert("Could not import “" + fileName + "”.\n\n" + message);
++        }
++    };
++
+     // Interactive
+     Module.openFileDialog = function(callback) {
+         console.log("[js] openFileDialog")
+@@ -101,6 +143,8 @@ const MuImpl = {
+ 
+         console.info("STEP 0: Begin load main module")
+ 
++        hostConfig = opt || {};
++
+         this.Module = {
+             config: config, // static configuration
+ 
+@@ -139,11 +183,45 @@ const MuImpl = {
+         }
+     },
+ 
++    // Browser file picker for "Open score" (called from the native side).
++    openScorePicker: function() {
++        const input = document.createElement("input");
++        input.type = "file";
++        input.accept = SCORE_FILETYPES.join(",");
++        input.style.display = "none";
++
++        input.onchange = () => {
++            const file = input.files && input.files[0];
++            input.remove();
++
++            if (file) {
++                MuImpl.loadScoreFile(file);
++            }
++        };
++
++        document.body.appendChild(input);
++        input.click();
++    },
++
+     loadScoreFile: async function(file) {
+         if (!file) {
+             return
+         }
+ 
++        const lowerName = String(file.name || "").toLowerCase();
++        const supported = SCORE_FILETYPES.some(suffix => lowerName.endsWith(suffix));
++        if (!supported) {
++            const message = "Unsupported file type. Use .mscz, .musicxml, .xml, .mxl, .mid, .midi or .kar.";
++            console.error("[js] unsupported file: ", file.name);
++            const onImportFailed = hostCallback("onImportFailed");
++            if (onImportFailed) {
++                onImportFailed(file.name, message);
++            } else {
++                window.alert("Could not import “" + file.name + "”.\n\n" + message);
++            }
++            return
++        }
++
+         const buffer = await file.arrayBuffer();
+         this.loadScoreData(new Uint8Array(buffer), file.name)
+     },
+diff --git a/src/web/appjs/viewer/viewer.html b/src/web/appjs/viewer/viewer.html
+index a64b503..e0de0b1 100644
+--- a/src/web/appjs/viewer/viewer.html
++++ b/src/web/appjs/viewer/viewer.html
+@@ -41,6 +41,52 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
+         cursor: pointer;
+       }
+       #screen { width: 100%; height: calc(100% - 40px); }
++
++      /* Drop target shown while a file is dragged over the page. */
++      #dropzone {
++        position: fixed;
++        inset: 0;
++        display: none;
++        align-items: center;
++        justify-content: center;
++        z-index: 1000;
++        background: rgba(20, 60, 120, 0.25);
++        border: 3px dashed #2b6cb0;
++        color: #10305c;
++        font: 600 22px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
++        pointer-events: none;
++      }
++      #dropzone.visible { display: flex; }
++
++      /* Import error banner. */
++      #import-error {
++        position: fixed;
++        left: 50%;
++        bottom: 28px;
++        transform: translateX(-50%);
++        display: none;
++        max-width: min(720px, 90vw);
++        padding: 12px 16px;
++        border-radius: 8px;
++        background: #7f1d1d;
++        color: #fff;
++        font: 400 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
++        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
++        z-index: 1001;
++        white-space: pre-wrap;
++      }
++      #import-error.visible { display: block; }
++      #import-error strong { font-weight: 600; }
++      #import-error button {
++        margin-left: 12px;
++        border: 0;
++        border-radius: 4px;
++        padding: 2px 8px;
++        background: rgba(255, 255, 255, 0.2);
++        color: inherit;
++        cursor: pointer;
++        font: inherit;
++      }
+     </style>
+   </head>
+   <body>
+@@ -55,6 +101,9 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
+ 
+     <div id="screen"></div>
+ 
++    <div id="dropzone">Drop a score here to open it<br><small>.mscz · .mscx · .musicxml · .mxl · .mid</small></div>
++    <div id="import-error" role="alert"></div>
++
+     <!-- <div id="panel">
+       <button onclick="onclickTest1()">Test 1</button>
+       <button>Test 2</button>
+@@ -89,6 +138,32 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
+           setTimeout(() => URL.revokeObjectURL(url), 10000);
+       }
+ 
++      // Formats the build can import (kept in sync with distr/muimpl.js).
++      const SCORE_FILETYPES = [".mscz", ".mscx", ".musicxml", ".xml", ".mxl", ".mid", ".midi", ".kar"];
++      const isScoreFile = (name) => SCORE_FILETYPES.some(suffix => String(name || "").toLowerCase().endsWith(suffix));
++
++      const errorBanner = document.querySelector('#import-error');
++      let errorTimer = 0;
++
++      const showImportError = (fileName, message) => {
++          errorBanner.innerHTML = '';
++
++          const text = document.createElement('span');
++          text.innerHTML = '<strong></strong> ';
++          text.querySelector('strong').textContent = `Could not import “${fileName || 'file'}”.`;
++          text.appendChild(document.createTextNode(message || "Unsupported or damaged file."));
++          errorBanner.appendChild(text);
++
++          const close = document.createElement('button');
++          close.textContent = 'Dismiss';
++          close.onclick = () => errorBanner.classList.remove('visible');
++          errorBanner.appendChild(close);
++
++          errorBanner.classList.add('visible');
++          clearTimeout(errorTimer);
++          errorTimer = setTimeout(() => errorBanner.classList.remove('visible'), 15000);
++      };
++
+       const mimeTypeForFile = (fileName) => {
+           const suffix = fileName.split(".").pop().toLowerCase();
+           switch (suffix) {
+@@ -175,10 +250,65 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
+ 
+             // Trigger a browser download with the exported score bytes.
+             downloadFile(name || "score.musicxml", data, mimeTypeForFile(name || ""));
++          },
++
++          onImportFailed: function(name, message) {
++            console.error("[html] onImportFailed: ", name, ", ", message)
++            showImportError(name, message);
+           }
+         })
+ 
+         document.addEventListener('click', window.muapi.startAudioProcessing, { once: true });
++
++        // Drag a score onto the page to open it.
++        const dropzone = document.querySelector('#dropzone');
++        let dragDepth = 0;
++
++        window.addEventListener('dragenter', (e) => {
++          if (!e.dataTransfer || !Array.from(e.dataTransfer.types).includes('Files')) {
++            return;
++          }
++
++          e.preventDefault();
++          dragDepth++;
++          dropzone.classList.add('visible');
++        });
++
++        window.addEventListener('dragover', (e) => {
++          if (e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')) {
++            e.preventDefault();
++            e.dataTransfer.dropEffect = 'copy';
++          }
++        });
++
++        window.addEventListener('dragleave', (e) => {
++          if (!e.dataTransfer || !Array.from(e.dataTransfer.types).includes('Files')) {
++            return;
++          }
++
++          dragDepth = Math.max(0, dragDepth - 1);
++          if (dragDepth === 0) {
++            dropzone.classList.remove('visible');
++          }
++        });
++
++        window.addEventListener('drop', (e) => {
++          if (!e.dataTransfer || !e.dataTransfer.files || e.dataTransfer.files.length === 0) {
++            return;
++          }
++
++          e.preventDefault();
++          dragDepth = 0;
++          dropzone.classList.remove('visible');
++
++          const file = e.dataTransfer.files[0];
++          if (!isScoreFile(file.name)) {
++            showImportError(file.name, "Unsupported file type. Use .mscz, .mscx, .musicxml, .xml, .mxl, .mid, .midi or .kar.");
++            return;
++          }
++
++          window.muapi.loadScoreFile(file);
++        });
+     } catch (e) {
+         console.error(e);
+         console.error(e.stack);
+diff --git a/src/web/appjs/webapi.cpp b/src/web/appjs/webapi.cpp
+index 813a748..596de62 100644
+--- a/src/web/appjs/webapi.cpp
++++ b/src/web/appjs/webapi.cpp
+@@ -34,6 +34,7 @@
+ #include "notation/imasternotation.h"
+ #include "notation/inotation.h"
+ 
++#include <algorithm>
+ #include <cstdio>
+ #include <vector>
+ 
+@@ -66,6 +67,21 @@ static void callJsWithString(const char* fnname, const std::string& value)
+     emscripten::val::module_property(fnname)(emscripten::val(value));
+ }
+ 
++static void callJsWithTwoStrings(const char* fnname, const std::string& a, const std::string& b)
++{
++    emscripten::val::module_property(fnname)(emscripten::val(a), emscripten::val(b));
++}
++
++static bool callJsBoolQuery(const char* fnname, const std::string& value, bool fallback)
++{
++    emscripten::val fn = emscripten::val::module_property(fnname);
++    if (fn.isUndefined() || fn.isNull()) {
++        return fallback;
++    }
++
++    return fn(emscripten::val(value)).as<bool>();
++}
++
+ #else
+ 
+ static void callJsWithBytes(const char*, const uint8_t*, size_t)
+@@ -83,6 +99,16 @@ static void callJsWithString(const char*, const std::string&)
+     NOT_SUPPORTED;
+ }
+ 
++static void callJsWithTwoStrings(const char*, const std::string&, const std::string&)
++{
++    NOT_SUPPORTED;
++}
++
++static bool callJsBoolQuery(const char*, const std::string&, bool fallback)
++{
++    return fallback;
++}
++
+ #endif
+ 
+ WebApi* WebApi::instance()
+@@ -182,21 +208,89 @@ void WebApi::loadFromPath(const std::string& path)
+     io::File::remove(dst);
+     if (!io::File::writeFile(dst, ByteArray(buf.data(), buf.size()))) {
+         LOGE() << "failed to write temporary project file";
++        notifyImportFailed(dst, "Could not store the file for import.");
+         return;
+     }
+ 
+     if (!openProjectScenario()) {
+         LOGE() << "open project scenario is not available";
++        notifyImportFailed(dst, "Open project scenario is not available.");
+         return;
+     }
+ 
+-    openProjectScenario()->openProject(dst).onResolve(this, [](const Ret& ret) {
++    LOGI() << "path: " << dst << ", dir exists: " << io::Dir(io::absoluteDirpath(dst)).exists()
++           << ", file exists: " << io::File::exists(dst);
++
++    const project::INotationProjectPtr currentProject = projectSession() ? projectSession()->project() : nullptr;
++
++    //! NOTE No score is open yet: the regular flow opens the notation page as well.
++    if (!currentProject) {
++        openProjectScenario()->openProject(dst).onResolve(this, [this, dst](const Ret& ret) {
++            if (!ret) {
++                LOGE() << "failed to open project: " << ret.toString();
++                reportImportError(dst, ret);
++            }
++        });
++        return;
++    }
++
++    //! NOTE The web build is single-window (the multiwindows provider is a stub, so the
++    //! "open in a new window" path of the open scenario does nothing). Replacing the
++    //! open score here is what makes importing a second file work at all.
++    //! The new score is loaded first and only then swapped in, so a file that fails to
++    //! import does not throw away the score the user is working on.
++    openProjectScenario()->loadProject(dst).onResolve(this, [this, dst, currentProject](
++                                                            const RetVal<project::INotationProjectPtr>& rv) {
++        if (!rv.ret) {
++            LOGE() << "failed to import: " << rv.ret.toString();
++            reportImportError(dst, rv.ret);
++            return;
++        }
++
++        //! NOTE The browser asks about unsaved changes: the native "save changes?" dialog is
++        //! QML based and the web shell has no dialog view, so it would never resolve.
++        if (currentProject->isNeedSave() && !confirmDiscardChanges(currentProject->displayName())) {
++            LOGI() << "import cancelled by the user, keeping: " << currentProject->path();
++            return;
++        }
++
++        projectSession()->setProject(rv.val);
++
++        const Ret ret = openProjectScenario()->finishOpening();
+         if (!ret) {
+-            LOGE() << "failed to open project: " << ret.toString();
++            LOGE() << "failed to show the imported score: " << ret.toString();
+         }
+     });
+ }
+ 
++void WebApi::requestOpenFile()
++{
++    LOGI() << "requestOpenFile";
++
++    //! NOTE The browser owns the file input; JS calls loadFromPath() with the picked file.
++    callJsWithString("onOpenScoreRequested", "");
++}
++
++void WebApi::notifyImportFailed(const muse::io::path_t& path, const std::string& message)
++{
++    callJsWithTwoStrings("onImportFailed", io::filename(path).toStdString(), message);
++}
++
++void WebApi::reportImportError(const muse::io::path_t& path, const Ret& ret)
++{
++    std::string message = ret.text();
++    if (message.empty()) {
++        message = "This file could not be read as a score. It may be damaged or in a format this build cannot import.";
++    }
++
++    notifyImportFailed(path, message);
++}
++
++bool WebApi::confirmDiscardChanges(const QString& displayName)
++{
++    return callJsBoolQuery("onConfirmDiscard", displayName.toStdString(), true);
++}
++
+ void WebApi::saveScore()
+ {
+     saveScoreTo(scoreBaseName() + ".mscz");
+@@ -253,12 +347,27 @@ io::path_t WebApi::scoreBaseName()
+         title = masterNotation->notation()->workTitle();
+     }
+ 
+-    // The title falls back to the score name, which may still be a project file name.
++    // The title falls back to the score name, which may still be a file name: for imported
++    // scores MuseScore sets the work title to the file it came from ("grace.mid"), so drop
++    // the (import) suffix to get "grace.mscz" / "grace.musicxml" rather than "grace.mid.mscz".
++    static const std::vector<std::string> fileSuffixes {
++        "mscz", "mscx", "mid", "midi", "kar", "musicxml", "xml", "mxl"
++    };
+     const std::string titleSuffix = io::suffix(io::path_t(title));
+-    if (titleSuffix == "mscz" || titleSuffix == "mscx") {
++    if (std::find(fileSuffixes.begin(), fileSuffixes.end(), titleSuffix) != fileSuffixes.end()) {
+         title = io::completeBasename(io::path_t(title)).toQString();
+     }
+ 
++    // Imported files (MusicXML / MIDI) have no work title of their own: keep the name of
++    // the file that was imported, so save / save-as suggest "<file>.mscz" instead of
++    // "score.mscz".
++    if (title.isEmpty()) {
++        const io::path_t projectPath = project->path();
++        if (!projectPath.empty()) {
++            title = io::completeBasename(projectPath).toQString();
++        }
++    }
++
+     if (title.isEmpty()) {
+         title = "score";
+     }
+diff --git a/src/web/appjs/webapi.h b/src/web/appjs/webapi.h
+index ea5950e..2f8c055 100644
+--- a/src/web/appjs/webapi.h
++++ b/src/web/appjs/webapi.h
+@@ -55,7 +55,12 @@ public:
+     void load(const void* source, unsigned int len);
+     //! Opens a score that already exists in the Emscripten virtual filesystem
+     //! (the JS side writes the bytes with FS.writeFile).
++    //! Accepts every format the build can read: mscz/mscx, MusicXML (xml/musicxml/mxl)
++    //! and MIDI (mid/midi/kar). In the single-window web build this replaces the
++    //! currently open score (after asking the browser to confirm discarding changes).
+     void loadFromPath(const std::string& path);
++    //! Asks JS to show the browser's file picker; the chosen file arrives via loadFromPath().
++    void requestOpenFile();
+     //! Writes a copy of the current score, named after the score, and hands the bytes to JS
+     //! (browser download).
+     void saveScore();
+@@ -79,6 +84,12 @@ private:
+ 
+     void onProjectSaved(const muse::io::path_t& path, mu::project::SaveMode mode);
+ 
++    //! Reports a failed import to JS (the web shell shows it to the user).
++    void notifyImportFailed(const muse::io::path_t& path, const std::string& message);
++    void reportImportError(const muse::io::path_t& path, const muse::Ret& ret);
++    //! True if the web shell agrees to drop the unsaved changes of the open score.
++    bool confirmDiscardChanges(const QString& displayName);
++
+     //! Base file name for downloads: the score title, or the project name as a fallback.
+     muse::io::path_t scoreBaseName();
+     void saveScoreTo(const muse::io::path_t& fileName);
+diff --git a/src/web/appshell/view/notationpagemodel.cpp b/src/web/appshell/view/notationpagemodel.cpp
+index 75a8841..e1e6c24 100644
+--- a/src/web/appshell/view/notationpagemodel.cpp
++++ b/src/web/appshell/view/notationpagemodel.cpp
+@@ -60,7 +60,10 @@ void NotationPageModel::newScore()
+ void NotationPageModel::openScore()
+ {
+     if (commandDispatcher()) {
+-        commandDispatcher()->dispatch(project::PROJECT_OPEN_COMMAND);
++        //! NOTE Opening a file is implemented by the JS bridge: the browser owns the file
++        //! picker. The native open dialog infrastructure expects native dialogs, which the
++        //! web shell does not have.
++        commandDispatcher()->dispatch(muse::rcommand::Command("command://web/open-score"));
+     }
+ }
+ 

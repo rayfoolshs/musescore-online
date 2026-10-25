@@ -1,3 +1,6 @@
 build.release/
 build.audio.release/
 .DS_Store
+MuseScore/
+site/
+upstream/

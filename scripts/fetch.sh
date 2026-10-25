@@ -37,6 +37,9 @@ echo "Applying patches"
 git apply "${REPO}/patches/0001-musescore-studio-web.patch"
 git -C muse apply "${REPO}/patches/0002-muse-framework.patch"
 git -C muse_deps apply "${REPO}/patches/0003-muse-deps.patch"
+# Import work (MIDI / MusicXML / mscz / mscx): applies on top of 0001 + 0002
+git apply "${REPO}/patches/0004-web-import-musescore.patch"
+git apply "${REPO}/patches/0005-web-import-muse.patch"
 
 cp "${REPO}/BUILD_PLAN.md" .
 mkdir -p scripts

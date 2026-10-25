@@ -12,13 +12,14 @@ no accounts, no collaboration.
 |---|---|
 | Familiar MuseScore UI in a browser tab | Cloud saving / accounts |
 | New score wizard, open & save `.mscz` locally | Real-time collaboration |
+| Import MIDI, MusicXML (`.musicxml`/`.xml`/`.mxl`) and MuseScore files (`.mscz`/`.mscx`) | Other importers (GuitarPro, Capella, OVE, MNX … are compiled out) |
 | Playback with a free GM SoundFont | Muse Sounds, VST, MuseSampler |
 | Static hosting (no server logic) | Cloud-only features (OMR / audio→score) |
 
 **Status: working prototype.**
 The editor UI runs in the browser, the New Score wizard works, scores open and engrave,
-**Save downloads a `.mscz` to disk**, and the transport plays back with FluidR3Mono as the
-GM bank.
+MIDI / MusicXML / MuseScore files can be imported, **Save downloads a `.mscz` to disk**, and
+the transport plays back with FluidR3Mono as the GM bank.
 
 ### Web toolbar
 
@@ -29,14 +30,15 @@ order: **Print, New, Open, Save, Save as ⌄, Export**.
 |---|---|---|---|
 | Print | `IconCode.PRINT` | `command://web/print-score` | `IExportProjectScenario::exportScores` → PDF → hidden iframe → browser print dialog |
 | New | `IconCode.NEW_FILE` | `command://project/new` | MuseScore's native "New score" wizard |
-| Open | `IconCode.OPEN_FILE` | `command://project/open` | `WebInteractive::selectOpeningFile` → JS file picker → MEMFS (keeps the original file name) |
+| Open | `IconCode.OPEN_FILE` | `command://web/open-score` | JS file picker (`distr/muimpl.js`) → MEMFS → `WebApi::loadFromPath` → import by suffix (`.mscz`, `.mscx`, MusicXML, MIDI) |
 | Save | `IconCode.SAVE` | `command://web/score-save` | `INotationProject::save(SaveCopy)` → `saveComplited` → JS blob download, named after the score |
 | Save as… | `IconCode.SMALL_ARROW_DOWN` | `command://web/score-save-as` | JS `prompt()` for a name → `saveScoreAs(name)` → same download path |
 | Export | `IconCode.SHARE_FILE` | `command://web/export-musicxml`, `command://web/export-midi` | menu → `IExportProjectScenario::exportScores` to MEMFS → `onScoreExported` → JS blob download |
 
 Save, Save as and Export all write the whole score (master notation) and name the file after
-the score title, falling back to the opened project file name. The web build compiles the real
-`iex_musicxml`, `iex_midi` and `iex_imagesexport` (PDF) modules instead of their stubs.
+the score title (with any import suffix stripped), falling back to the name of the file the
+score was opened/imported from. The web build compiles the real `iex_musicxml`, `iex_midi` and
+`iex_imagesexport` (PDF) modules instead of their stubs.
 
 ---
 
@@ -60,7 +62,7 @@ Exact versions below are what the MuseScore CI uses, and what this build is veri
 | Component | Version | Notes |
 |---|---|---|
 | Qt (target) | **6.11.2**, `wasm_singlethread` | `aqt install-qt all_os wasm 6.11.2 wasm_singlethread -m qt5compat qtshadertools qtwebsockets` |
-| Qt (host) | 6.11.2, macOS desktop | Required for `QT_HOST_PATH` (moc/rcc/qtshaderc) |
+| Qt (host) | 6.11.2, macOS desktop | Required for `QT_HOST_PATH` (moc/rcc/qtshaderc). Install `-m qtshadertools` as well: the **wasm** `Qt6ShaderTools` package needs the host `qsb` tool (`Qt6ShaderToolsTools`), otherwise configure fails with "failed to find required Qt component ShaderTools". `aqt` installs it as `Qt/6.11.2/macos` |
 | Emscripten | **4.0.7** | Pinned to match Qt 6.11.2 |
 | CMake | 4.x | |
 | Ninja | 1.13+ | |
@@ -71,15 +73,21 @@ which is what makes plain GitHub Pages hosting viable.
 
 ### Environment file
 
-`ninja_build.sh` sources `$HOME/build_tools/environment.sh`. Minimal macOS version:
+`ninja_build.sh` sources `$HOME/build_tools/environment.sh`. Minimal macOS version (paths as
+`aqt` and `emsdk` create them):
 
 ```bash
-export QT_DIR="/path/to/Qt/6.11.2/wasm_singlethread"
+export EMSDK_PATH="$HOME/emsdk"
+export QT_DIR="$HOME/Qt/6.11.2/wasm_singlethread"
 export QT_ROOT_DIR="$QT_DIR"
-export QT_HOST_PATH="/path/to/Qt/6.11.2/macos"
-export QT_CHAINLOAD_TOOLCHAIN_FILE="/path/to/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
-source /path/to/emsdk/emsdk_env.sh
+export QT_HOST_PATH="$HOME/Qt/6.11.2/macos"
+export QT_CHAINLOAD_TOOLCHAIN_FILE="$EMSDK_PATH/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
+export CMAKE_TOOLCHAIN_FILE="$QT_ROOT_DIR/lib/cmake/Qt6/qt.toolchain.cmake"
+source "$EMSDK_PATH/emsdk_env.sh"
 ```
+
+`scripts/build.sh` finds the same three locations on its own; the env file is only needed for
+other entry points (or for non-default install paths).
 
 ---
 
@@ -193,7 +201,7 @@ to start an `AudioContext` (autoplay policy). That gesture triggers
 | `web/appshell/qml/Main.qml` | no export actions in the web UI | Export button + menu (MusicXML / MIDI) |
 | `web/appjs/viewer/viewer.html`, `distr/muapi.js` | no export download | `onScoreExported` → Blob + anchor download, MIME by suffix |
 | `SetupConfigure.cmake` (`app-web`) | `MUE_BUILD_IMPEXP_IMAGESEXPORT_MODULE` `OFF` → no PDF writer | set `ON`; backs the Print action |
-| `web/appjs/webapi.{h,cpp}` | save always wrote `saved.mscz`; no naming, no save-as | `scoreBaseName()` (title → project name → `score`), `saveScoreAs(name)`, `requestSaveAs()` |
+| `web/appjs/webapi.{h,cpp}` | save always wrote `saved.mscz`; no naming, no save-as | `scoreBaseName()` (title, import suffix stripped → project name → `score`), `saveScoreAs(name)`, `requestSaveAs()` |
 | `web/appjs/webapi.cpp` (`loadFromPath`) | every opened file was copied to `/mu/temp/current.mscz`, losing its name | writes through the io layer to the original `/mu/temp/<name>`, so title/save/export names follow the file |
 | `app/webapi_export.cpp` | no save-as entry point | `EMSCRIPTEN_KEEPALIVE saveScoreAs(fileName)` |
 | `web/appjs/webapi.{h,cpp}` | no print path | `printScore()` → PDF export → `onPrintReady(name, bytes)` |
@@ -201,6 +209,14 @@ to start an `AudioContext` (autoplay policy). That gesture triggers
 | `web/appshell/iappshellconfiguration.h` | interface still declared navigator visibility methods that moved to `IAppShellState` | declarations removed |
 | `web/appshell/view/mainwindowtitleprovider.h` | included the removed `context/iprojectsession.h` | `project/iprojectsession.h`, `mu::project::IProjectSession` |
 | `web/appshell/view/notationstatusbarmodel.{h,cpp}` | missing includes for notation/command types | includes added |
+| `web/appjs/webapi.cpp` (`loadFromPath`) | a second file could never be opened: the open scenario hands it to a new window, and the multiwindows provider is a stub on web | the file is loaded first (`IOpenProjectScenario::loadProject`) and only replaces the open score when it succeeded, so a failed import keeps the current score |
+| `project/iopenprojectscenario.h`, `internal/openprojectscenario.h` | `loadProject()` was private, so "read without switching" was impossible | exposed on the interface (and the test mock) |
+| `web/appjs/appjsmodule.cpp`, `web/appshell/view/notationpagemodel.cpp` | the Open button dispatched the native open command, whose dialogs the web shell lacks | `command://web/open-score` → `WebApi::requestOpenFile()` → JS picker |
+| `web/appjs/distr/muimpl.js` | host callbacks were read from `Module.config`, which `qtLoad()` replaces with Qt's own config → every import error fell back to `alert()` | host callbacks kept in a module-scoped `hostConfig`; added the file picker, the "discard unsaved changes?" confirm and the import-error callback |
+| `web/appjs/viewer/viewer.html` | no file input, no drag & drop, import errors invisible | hidden `<input type="file">` (created by `muimpl.js`), drag & drop overlay, dismissible error banner |
+| `web/appjs/webapi.cpp` (`scoreBaseName`) | imported scores (no work title) saved as `score.mscz` | falls back to the imported file name (`grace.mid` → `grace.mscz`) |
+| `muse/framework/global/io/internal/memfilesystem.cpp` | `MemFileSystem` has no directory entries, so `DirReader` (uncompressed `.mscx`) saw the container directory as missing → "File open error" | `exists()` also reports parent directories of stored files (with guards in `readFile`/`fileSize`) |
+| `muse/framework/interactive/internal/platform/web/webinteractive.cpp` | dialogs forwarded to the QML provider: synchronous ones answer "Not supported!!" and **abort the app** (a malformed MusicXML killed the page), asynchronous ones open stray top-level windows that linger and leak MEMFS paths | `question`/`info`/`warning`/`error` (sync and async) log the message and answer with the default button; the web shell reports user-visible problems itself (import banner) |
 | `web/appjs/distr/audiodriver.js` | a rebuilt `MuseAudio.js` could be served from the browser cache | cache-busting query on the worklet module (`MuseAudio.js?v=N`) |
 | `web/appshell/qml/Main.qml`, `appshell.qrc` | upstream shipped a scratch `Dev` tab (Qt drag-and-drop demo) | tab, `DevFrame.qml` and its `.qrc` entry removed |
 
@@ -217,6 +233,47 @@ to start an `AudioContext` (autoplay policy). That gesture triggers
 | `EngineController::registerExports()` gone; `ModulesIoC` gone | use `EngineGlobalSetup` + `ModulesGlobalIoC` |
 | **`HEAPU8` not exported** → every audio callback threw → silence | `EXPORTED_RUNTIME_METHODS=ccall,cwrap,HEAPU8` |
 | **no async pump in the AudioWorklet** → `prepareToPlay` never ran → transport hung | `muse::async::processMessages()` in `WebAudioEngine::process()` |
+
+### 5.4 Score import (MIDI / MusicXML / MuseScore files)
+
+The web build can open **`.mscz`** (MuseScore 4 projects), **`.mscx`** (uncompressed),
+**MusicXML** (`.musicxml`, `.xml`, `.mxl`) and **MIDI** (`.mid`, `.midi`, `.kar`). The readers
+are the real upstream ones: the project module handles MuseScore files, `iex_musicxml` and
+`iex_midi` handle the rest (the same modules that supply the export writers).
+
+```
+Open button ──▶ command://web/open-score ──▶ WebApi::requestOpenFile()
+                                                        │  (module_property)
+                                                        ▼
+                                  muimpl.js  file picker / drag & drop
+                                                        │  muapi.loadScoreFile(file)
+                                                        ▼
+                          MEMFS /mu/temp/<original name>  ──▶  WebApi::loadFromPath()
+                                                        │
+                        ┌───────────────────────────────┴────────────────────────────┐
+                        ▼                                                            ▼
+        no score open: IOpenProjectScenario::openProject()   score open: loadProject()
+        (regular flow, opens the notation page)              → browser confirm → setProject()
+```
+
+Details worth knowing:
+
+- **Single window.** The open scenario's "already open → open a new window" branch is a no-op
+  on web (the multiwindows provider is a stub), so a second file used to do nothing. The web
+  bridge loads the new file first and only then swaps it in, so a damaged file leaves the
+  open score untouched.
+- **Unsaved changes** are confirmed by the browser (`onConfirmDiscard`); the native
+  "save changes?" dialog is not used because the web shell has no dialog surface.
+- **Errors** are reported through `onImportFailed` → a dismissible banner in `viewer.html`.
+  The interactive layer answers dialog calls with the default button instead of aborting
+  (a malformed MusicXML used to kill the wasm runtime).
+- **`.mscx`** is read through `MscReader`'s `DirReader`, which stats the containing directory;
+  `MemFileSystem` has no directory entries, hence the `exists()` fix.
+- **Names.** `scoreBaseName()` prefers the score title, strips any import suffix from it, and
+  falls back to the imported file name — so a `.mid` opens as *grace* and saves as
+  `grace.mscz` / exports as `grace.musicxml`, `grace.mid`.
+- **Not supported:** MuseScore 4's *uncompressed project folder* (a directory with
+  `META-INF/container.xml`) — a browser file input can only upload files, not folders.
 
 ---
 
@@ -263,6 +320,13 @@ viewer.html
 | Save / Save as naming | ✅ save → `Amazing_Grace.mscz`; save-as (prompt "My Score") → `My_Score.mscz` |
 | Print → PDF + print dialog | ✅ 35,805 B `Amazing_Grace.pdf`, `%PDF-1.4`, 2 pages, opened in the print iframe |
 | Text / lyric rendering | ✅ (`Times New Roman → FreeSerif`; `how sweet the sound`, `was lost`) |
+| Import MusicXML (`.musicxml`, `.xml`) | ✅ MuseScore 4.7.5 export of "Amazing Grace", 4 parts, lyrics intact |
+| Import compressed MusicXML (`.mxl`) | ✅ same score from MS4's `.mxl` |
+| Import MIDI (`.mid`) | ✅ 4 tracks, tempo/time signature, lyrics-as-melody, plays back |
+| Import MuseScore 4 project (`.mscz`) | ✅ saved by MuseScore 4.7.5 |
+| Import uncompressed `.mscx` | ✅ loaded after the `MemFileSystem` directory fix |
+| Import replaces the open score | ✅ (browser confirm for unsaved changes, keeps the old score if the new file fails) |
+| Unsupported / damaged file | ✅ error banner, app keeps running and keeps the open score |
 
 ---
 
@@ -279,6 +343,12 @@ viewer.html
    lazy-loading the SoundFont.
 5. **Print** — PDF is rendered natively and printed from a hidden iframe; if the browser
    blocks it, the PDF opens in a new tab instead.
+6. **Dialogs are log-only on web** — `question`/`info`/`warning`/`error` answer with the
+   default button and print the text to the browser console. Import problems reach the user
+   through the viewer banner; other messages (e.g. a failing save) only appear in the console.
+7. **Import is single-window** — opening a file replaces the score in the current tab. A
+   directory-shaped uncompressed project (`.mscx` folder with `META-INF/container.xml`)
+   cannot be uploaded, only single files.
 
 ### Fixed during development
 
@@ -316,7 +386,8 @@ MuseScore/
 ├─ muse_deps/                        ← dependencies submodule
 └─ muse/build.artifacts/             ← built app (wasm, js, distr/, sound/)
 
-../Musescore Online/                 ← project folder with the original plan + screenshots
+../Musescore Online/                 ← patches repo (this document + screenshots)
+├─ patches/                          ← 0001-0003 web build, 0004/0005 score import
 └─ screenshots/
    ├─ musescore-in-browser.png       editor UI
    ├─ musescore-score-in-browser.png loaded score

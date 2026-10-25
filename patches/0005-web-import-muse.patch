@@ -1,0 +1,219 @@
+diff --git a/muse/framework/global/io/internal/memfilesystem.cpp b/muse/framework/global/io/internal/memfilesystem.cpp
+index d9cc7f1..e38e075 100644
+--- a/muse/framework/global/io/internal/memfilesystem.cpp
++++ b/muse/framework/global/io/internal/memfilesystem.cpp
+@@ -29,6 +29,7 @@
+ 
+ #include "global/containers.h"
+ #include "global/stringutils.h"
++#include "global/io/ioretcodes.h"
+ 
+ #include "log.h"
+ 
+@@ -41,13 +42,37 @@ static bool isRC(const muse::io::path_t& path)
+     return muse::strings::startsWith(path.toStdString(), ":/");
+ }
+ 
++static bool hasFileBelow(const std::map<muse::io::path_t, muse::ByteArray>& files, const muse::io::path_t& dirPath)
++{
++    const std::string dirPrefix = dirPath.toStdString() + "/";
++    for (const auto& item : files) {
++        if (muse::strings::startsWith(item.first.toStdString(), dirPrefix)) {
++            return true;
++        }
++    }
++
++    return false;
++}
++
+ muse::Ret MemFileSystem::exists(const muse::io::path_t& path) const
+ {
+     if (isRC(path)) {
+         return QFile::exists(path.toQString());
+-    } else {
+-        return muse::contains(m_files, path);
+     }
++
++    if (muse::contains(m_files, path)) {
++        return muse::make_ok();
++    }
++
++    //! NOTE There are no directory entries in this filesystem: a path is also considered to
++    //! exist if a stored file lives below it. MuseScore's uncompressed project reader
++    //! (`.mscx`, Dir mode) checks that the containing directory exists before reading the
++    //! score file from it.
++    if (hasFileBelow(m_files, path)) {
++        return muse::make_ok();
++    }
++
++    return make_ret(Err::FSNotExist);
+ }
+ 
+ muse::Ret MemFileSystem::remove(const muse::io::path_t& path, bool onlyIfEmpty)
+@@ -139,7 +164,12 @@ muse::RetVal<uint64_t> MemFileSystem::fileSize(const muse::io::path_t& path) con
+         QFileInfo fi(path.toQString());
+         return muse::RetVal<uint64_t>::make_ok(fi.size());
+     } else {
+-        return muse::RetVal<uint64_t>::make_ok(m_files.at(path).size());
++        //! NOTE exists() also reports parent directories; only stored files have a size.
++        auto it = m_files.find(path);
++        if (it == m_files.end()) {
++            return muse::RetVal<uint64_t>(make_ret(Err::FSNotExist));
++        }
++        return muse::RetVal<uint64_t>::make_ok(it->second.size());
+     }
+ }
+ 
+@@ -180,6 +210,11 @@ muse::Ret MemFileSystem::readFile(const muse::io::path_t& path, muse::ByteArray&
+         return ret;
+     }
+ 
++    //! NOTE exists() also reports parent directories; only stored files can be read.
++    if (!isRC(path) && !muse::contains(m_files, path)) {
++        return make_ret(Err::FSNotExist);
++    }
++
+     if (isRC(path)) {
+         QFile file(path.toQString());
+         file.open(QIODevice::ReadOnly);
+diff --git a/muse/framework/interactive/internal/platform/web/webinteractive.cpp b/muse/framework/interactive/internal/platform/web/webinteractive.cpp
+index 7aafeab..541ee42 100644
+--- a/muse/framework/interactive/internal/platform/web/webinteractive.cpp
++++ b/muse/framework/interactive/internal/platform/web/webinteractive.cpp
+@@ -99,56 +99,128 @@ IInteractive::Result WebInteractive::questionSync(const std::string& contentTitl
+                                                   const ButtonDatas& buttons, int defBtn,
+                                                   const Options& options, const std::string& dialogTitle)
+ {
+-    return m_origin->questionSync(contentTitle, text, buttons, defBtn, options, dialogTitle);
++    UNUSED(buttons);
++    UNUSED(options);
++    UNUSED(dialogTitle);
++
++    //! NOTE The web shell has no synchronous dialogs: forwarding these calls to the
++    //! QML interactive provider aborts the app ("Interactive::openSync | Not supported!!").
++    //! Answer with the default button and leave the message in the browser console.
++    LOGW() << "questionSync: " << contentTitle << ": " << text.text;
++    return Result(defBtn);
+ }
+ 
+ async::Promise<IInteractive::Result> WebInteractive::question(const std::string& contentTitle, const Text& text,
+                                                               const ButtonDatas& buttons, int defBtn,
+                                                               const Options& options, const std::string& dialogTitle)
+ {
+-    return m_origin->question(contentTitle, text, buttons, defBtn, options, dialogTitle);
++    UNUSED(buttons);
++    UNUSED(options);
++    UNUSED(dialogTitle);
++
++    //! NOTE The web shell has no dialog surface: the QML provider opens stray top-level
++    //! windows that linger over the app (and would show internal paths). Log the message
++    //! and answer with the default button; the web shell reports user-visible problems itself.
++    LOGW() << "question: " << contentTitle << ": " << text.text;
++    return async::make_promise<IInteractive::Result>([defBtn](auto resolve) {
++        return resolve(Result(defBtn));
++    });
+ }
+ 
+ IInteractive::Result WebInteractive::infoSync(const std::string& contentTitle, const Text& text,
+                                               const ButtonDatas& buttons, int defBtn,
+                                               const Options& options, const std::string& dialogTitle)
+ {
+-    return m_origin->infoSync(contentTitle, text, buttons, defBtn, options, dialogTitle);
++    UNUSED(buttons);
++    UNUSED(options);
++    UNUSED(dialogTitle);
++
++    //! NOTE The web shell has no synchronous dialogs: forwarding these calls to the
++    //! QML interactive provider aborts the app ("Interactive::openSync | Not supported!!").
++    //! Answer with the default button and leave the message in the browser console.
++    LOGW() << "infoSync: " << contentTitle << ": " << text.text;
++    return Result(defBtn);
+ }
+ 
+ async::Promise<IInteractive::Result> WebInteractive::info(const std::string& contentTitle, const Text& text,
+                                                           const ButtonDatas& buttons, int defBtn,
+                                                           const Options& options, const std::string& dialogTitle)
+ {
+-    return m_origin->info(contentTitle, text, buttons, defBtn, options, dialogTitle);
++    UNUSED(buttons);
++    UNUSED(options);
++    UNUSED(dialogTitle);
++
++    //! NOTE The web shell has no dialog surface: the QML provider opens stray top-level
++    //! windows that linger over the app (and would show internal paths). Log the message
++    //! and answer with the default button; the web shell reports user-visible problems itself.
++    LOGW() << "info: " << contentTitle << ": " << text.text;
++    return async::make_promise<IInteractive::Result>([defBtn](auto resolve) {
++        return resolve(Result(defBtn));
++    });
+ }
+ 
+ IInteractive::Result WebInteractive::warningSync(const std::string& contentTitle, const Text& text,
+                                                  const ButtonDatas& buttons, int defBtn,
+                                                  const Options& options, const std::string& dialogTitle)
+ {
+-    return m_origin->warningSync(contentTitle, text, buttons, defBtn, options, dialogTitle);
++    UNUSED(buttons);
++    UNUSED(options);
++    UNUSED(dialogTitle);
++
++    //! NOTE The web shell has no synchronous dialogs: forwarding these calls to the
++    //! QML interactive provider aborts the app ("Interactive::openSync | Not supported!!").
++    //! Answer with the default button and leave the message in the browser console.
++    LOGW() << "warningSync: " << contentTitle << ": " << text.text;
++    return Result(defBtn);
+ }
+ 
+ async::Promise<IInteractive::Result> WebInteractive::warning(const std::string& contentTitle, const Text& text,
+                                                              const ButtonDatas& buttons, int defBtn,
+                                                              const Options& options, const std::string& dialogTitle)
+ {
+-    return m_origin->warning(contentTitle, text, buttons, defBtn, options, dialogTitle);
++    UNUSED(buttons);
++    UNUSED(options);
++    UNUSED(dialogTitle);
++
++    //! NOTE The web shell has no dialog surface: the QML provider opens stray top-level
++    //! windows that linger over the app (and would show internal paths). Log the message
++    //! and answer with the default button; the web shell reports user-visible problems itself.
++    LOGW() << "warning: " << contentTitle << ": " << text.text;
++    return async::make_promise<IInteractive::Result>([defBtn](auto resolve) {
++        return resolve(Result(defBtn));
++    });
+ }
+ 
+ IInteractive::Result WebInteractive::errorSync(const std::string& contentTitle, const Text& text,
+                                                const ButtonDatas& buttons, int defBtn,
+                                                const Options& options, const std::string& dialogTitle)
+ {
+-    return m_origin->errorSync(contentTitle, text, buttons, defBtn, options, dialogTitle);
++    UNUSED(buttons);
++    UNUSED(options);
++    UNUSED(dialogTitle);
++
++    //! NOTE The web shell has no synchronous dialogs: forwarding these calls to the
++    //! QML interactive provider aborts the app ("Interactive::openSync | Not supported!!").
++    //! Answer with the default button and leave the message in the browser console.
++    LOGW() << "errorSync: " << contentTitle << ": " << text.text;
++    return Result(defBtn);
+ }
+ 
+ async::Promise<IInteractive::Result> WebInteractive::error(const std::string& contentTitle, const Text& text,
+                                                            const ButtonDatas& buttons, int defBtn,
+                                                            const Options& options, const std::string& dialogTitle)
+ {
+-    return m_origin->error(contentTitle, text, buttons, defBtn, options, dialogTitle);
++    UNUSED(buttons);
++    UNUSED(options);
++    UNUSED(dialogTitle);
++
++    //! NOTE The web shell has no dialog surface: the QML provider opens stray top-level
++    //! windows that linger over the app (and would show internal paths). Log the message
++    //! and answer with the default button; the web shell reports user-visible problems itself.
++    LOGW() << "error: " << contentTitle << ": " << text.text;
++    return async::make_promise<IInteractive::Result>([defBtn](auto resolve) {
++        return resolve(Result(defBtn));
++    });
+ }
+ 
+ void WebInteractive::showProgress(const std::string& title, Progress progress)
