@@ -1,0 +1,319 @@
+<!--
+Copyright (C) 2024 The Qt Company Ltd.
+SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
+-->
+
+<!doctype html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+
+    <!--Set visual viewport size for mobile devices to the device size,
+        witch results in a scale of 1 and a 1:1 mapping between CSS pixels
+        and Qt device independent pixels. -->
+    <meta name="viewport" content="width=device-width, height=device-height, user-scalable=0"/>
+
+    <title>MuseScoreStudio</title>
+    <style>
+      html, body { padding: 0; margin: 0; overflow: hidden; height: 100% }
+      #spinner {
+        display: flex;
+        justify-content: center; /* горизонтальное выравнивание */
+        align-items: center;     /* вертикальное выравнивание */
+        height: 100vh;           /* на всю высоту viewport */
+      }
+      #panel { 
+        width: 100%; 
+        height: 40px; 
+        background-color: #f0f0f0; 
+        display: flex; 
+        align-items: center;
+        padding: 2px 5px;
+        box-sizing: border-box;
+      }
+      #panel button {
+        margin-right: 5px;
+        height: 16px;
+        font-size: 10px;
+        line-height: 10px;
+        padding: 0 4px;
+        cursor: pointer;
+      }
+      #screen { width: 100%; height: calc(100% - 40px); }
+
+      /* Drop target shown while a file is dragged over the page. */
+      #dropzone {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
+        background: rgba(20, 60, 120, 0.25);
+        border: 3px dashed #2b6cb0;
+        color: #10305c;
+        font: 600 22px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+        pointer-events: none;
+      }
+      #dropzone.visible { display: flex; }
+
+      /* Import error banner. */
+      #import-error {
+        position: fixed;
+        left: 50%;
+        bottom: 28px;
+        transform: translateX(-50%);
+        display: none;
+        max-width: min(720px, 90vw);
+        padding: 12px 16px;
+        border-radius: 8px;
+        background: #7f1d1d;
+        color: #fff;
+        font: 400 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        z-index: 1001;
+        white-space: pre-wrap;
+      }
+      #import-error.visible { display: block; }
+      #import-error strong { font-weight: 600; }
+      #import-error button {
+        margin-left: 12px;
+        border: 0;
+        border-radius: 4px;
+        padding: 2px 8px;
+        background: rgba(255, 255, 255, 0.2);
+        color: inherit;
+        cursor: pointer;
+        font: inherit;
+      }
+    </style>
+  </head>
+  <body>
+
+    <figure id="spinner">
+      <center style="margin-top:1.5em; line-height:150%">
+        <strong>MuseScoreStudio</strong>
+        <div id="status"></div>
+        <noscript>JavaScript is disabled. Please enable JavaScript to use this application.</noscript>
+      </center>
+    </figure>
+
+    <div id="screen"></div>
+
+    <div id="dropzone">Drop a score here to open it<br><small>.mscz · .mscx · .musicxml · .mxl · .mid</small></div>
+    <div id="import-error" role="alert"></div>
+
+    <!-- <div id="panel">
+      <button onclick="onclickTest1()">Test 1</button>
+      <button>Test 2</button>
+      <button>Test 3</button>
+      <input id="load_file" type="file" onchange="window.muapi.loadScoreFile(this.files[0])">
+    </div> -->
+
+    <script type="module">
+      import createMuApi from "./distr/muapi.js";
+
+      const spinner = document.querySelector('#spinner');
+      const screen = document.querySelector('#screen');
+      const status = document.querySelector('#status');
+
+      const showUi = (ui) => {
+          [spinner, screen].forEach(element => element.style.display = 'none');
+          if (screen === ui)
+              screen.style.position = 'default';
+          ui.style.display = 'block';
+      }
+
+      // Hand bytes coming from the native side to the browser as a download.
+      const downloadFile = (fileName, data, mimeType) => {
+          const blob = new Blob([data], { type: mimeType });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = fileName;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 10000);
+      }
+
+      // Formats the build can import (kept in sync with distr/muimpl.js).
+      const SCORE_FILETYPES = [".mscz", ".mscx", ".musicxml", ".xml", ".mxl", ".mid", ".midi", ".kar"];
+      const isScoreFile = (name) => SCORE_FILETYPES.some(suffix => String(name || "").toLowerCase().endsWith(suffix));
+
+      const errorBanner = document.querySelector('#import-error');
+      let errorTimer = 0;
+
+      const showImportError = (fileName, message) => {
+          errorBanner.innerHTML = '';
+
+          const text = document.createElement('span');
+          text.innerHTML = '<strong></strong> ';
+          text.querySelector('strong').textContent = `Could not import “${fileName || 'file'}”.`;
+          text.appendChild(document.createTextNode(message || "Unsupported or damaged file."));
+          errorBanner.appendChild(text);
+
+          const close = document.createElement('button');
+          close.textContent = 'Dismiss';
+          close.onclick = () => errorBanner.classList.remove('visible');
+          errorBanner.appendChild(close);
+
+          errorBanner.classList.add('visible');
+          clearTimeout(errorTimer);
+          errorTimer = setTimeout(() => errorBanner.classList.remove('visible'), 15000);
+      };
+
+      const mimeTypeForFile = (fileName) => {
+          const suffix = fileName.split(".").pop().toLowerCase();
+          switch (suffix) {
+          case "musicxml":
+          case "xml":
+              return "application/vnd.recordare.musicxml+xml";
+          case "mxl":
+              return "application/vnd.recordare.musicxml";
+          case "mid":
+          case "midi":
+              return "audio/midi";
+          default:
+              return "application/octet-stream";
+          }
+      }
+
+      try {
+      
+        showUi(spinner);
+        status.innerHTML = 'Loading...';
+
+        window.muapi = await createMuApi({
+
+          // properties
+          screen: screen,
+
+          // runtime
+          onLoaded: () => showUi(screen),
+          onExit: function(exitData) {
+            status.innerHTML = 'Application exit';
+            status.innerHTML += exitData.code !== undefined ? ` with code ${exitData.code}` : '';
+            status.innerHTML += exitData.text !== undefined ? ` (${exitData.text})` : '';
+            showUi(spinner);
+          },
+
+          // api callbacks
+          onProjectSaved: function(name, data) {
+            console.log("[html] onProjectSaved: ", name, ", len: ", data.length)
+
+            // Trigger a browser download with the saved score bytes.
+            downloadFile(name || "score.mscz", data, "application/octet-stream");
+          },
+
+          onPrintReady: function(name, data) {
+            console.log("[html] onPrintReady: ", name, ", len: ", data.length)
+
+            // Render the PDF off-screen and let the browser's PDF viewer print it.
+            const blob = new Blob([data], { type: "application/pdf" });
+            const url = URL.createObjectURL(blob);
+            const frame = document.createElement("iframe");
+            frame.style.position = "fixed";
+            frame.style.right = "0";
+            frame.style.bottom = "0";
+            frame.style.width = "1px";
+            frame.style.height = "1px";
+            frame.style.opacity = "0";
+            frame.src = url;
+            frame.onload = function() {
+              try {
+                frame.contentWindow.focus();
+                frame.contentWindow.print();
+              } catch (e) {
+                console.error("print failed, opening the PDF instead", e);
+                window.open(url, "_blank");
+              }
+            };
+            document.body.appendChild(frame);
+            setTimeout(function() {
+              frame.remove();
+              URL.revokeObjectURL(url);
+            }, 120000);
+          },
+
+          onSaveAsRequested: function(suggestedName) {
+            // The browser has no native file dialog for picking a name, so ask here.
+            const fileName = window.prompt("Save score as", suggestedName || "score.mscz");
+            if (fileName) {
+              window.muapi.saveScoreAs(fileName);
+            }
+          },
+
+          onScoreExported: function(name, data) {
+            console.log("[html] onScoreExported: ", name, ", len: ", data.length)
+
+            // Trigger a browser download with the exported score bytes.
+            downloadFile(name || "score.musicxml", data, mimeTypeForFile(name || ""));
+          },
+
+          onImportFailed: function(name, message) {
+            console.error("[html] onImportFailed: ", name, ", ", message)
+            showImportError(name, message);
+          }
+        })
+
+        document.addEventListener('click', window.muapi.startAudioProcessing, { once: true });
+
+        // Drag a score onto the page to open it.
+        const dropzone = document.querySelector('#dropzone');
+        let dragDepth = 0;
+
+        window.addEventListener('dragenter', (e) => {
+          if (!e.dataTransfer || !Array.from(e.dataTransfer.types).includes('Files')) {
+            return;
+          }
+
+          e.preventDefault();
+          dragDepth++;
+          dropzone.classList.add('visible');
+        });
+
+        window.addEventListener('dragover', (e) => {
+          if (e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+          }
+        });
+
+        window.addEventListener('dragleave', (e) => {
+          if (!e.dataTransfer || !Array.from(e.dataTransfer.types).includes('Files')) {
+            return;
+          }
+
+          dragDepth = Math.max(0, dragDepth - 1);
+          if (dragDepth === 0) {
+            dropzone.classList.remove('visible');
+          }
+        });
+
+        window.addEventListener('drop', (e) => {
+          if (!e.dataTransfer || !e.dataTransfer.files || e.dataTransfer.files.length === 0) {
+            return;
+          }
+
+          e.preventDefault();
+          dragDepth = 0;
+          dropzone.classList.remove('visible');
+
+          const file = e.dataTransfer.files[0];
+          if (!isScoreFile(file.name)) {
+            showImportError(file.name, "Unsupported file type. Use .mscz, .mscx, .musicxml, .xml, .mxl, .mid, .midi or .kar.");
+            return;
+          }
+
+          window.muapi.loadScoreFile(file);
+        });
+    } catch (e) {
+        console.error(e);
+        console.error(e.stack);
+    }
+    </script>
+    <script src="MuseScoreStudio.js"></script> 
+  </body>
+</html>
