@@ -54,11 +54,12 @@ git -C muse_deps apply /path/to/patches/0003-muse-deps.patch
 aqt install-qt all_os wasm 6.11.2 wasm_singlethread -m qt5compat qtshadertools qtwebsockets
 
 # 4. Build (see BUILD_PLAN.md §3–4 for the environment file)
+cp -r /path/to/patches/../scripts .   # scripts/build.sh + scripts/serve.sh
 ./scripts/build.sh
 ```
 
 Output lands in `muse/build.artifacts/` (editor + audio engine + JS glue + SoundFont), ready for
-static hosting.
+static hosting. Run `./scripts/serve.sh` from the checkout root to try it.
 
 ## Run locally
 

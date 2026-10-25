@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Rebuild MuseScore Online: editor (WASM) + audio engine (AudioWorklet).
-# Assumes the patches from this repository have been applied and the toolchain is installed.
-#
-# See BUILD_PLAN.md §3 for the toolchain and the environment file.
+# Run this from the root of the MuseScore checkout (copy the scripts/ folder there),
+# after applying the patches. See README.md and BUILD_PLAN.md §3-4.
 set -euo pipefail
+
+if [[ ! -f ./ninja_build.sh || ! -d ./src/web ]]; then
+    echo "error: run this from the MuseScore checkout root (copy scripts/ there first)" >&2
+    exit 1
+fi
 
 : "${QT_DIR:=${HOME}/Qt/6.11.2/wasm_singlethread}"
 : "${QT_ROOT_DIR:=${QT_DIR}}"
@@ -39,4 +43,4 @@ mkdir -p build.audio.release
 
 echo
 echo "Built: muse/build.artifacts/"
-echo "Serve: cd muse/build.artifacts && python3 -m http.server 8099 --bind 127.0.0.1"
+echo "Serve: python3 -m http.server 8099 --bind 127.0.0.1 (from that folder)"
