@@ -34,6 +34,24 @@ impractical. This repo therefore contains:
 
 The `gh-pages` branch holds the built application that the live demo serves.
 
+### Backups
+
+| What | Where |
+|---|---|
+| Changes, docs, scripts | `main` (this branch) |
+| Full patched source tree | release **`web-build`** → `musescore-online-src-cc7133f6.tar.gz` (141 MB, 15,040 files) |
+| Built app | `gh-pages` + the live site |
+
+The `web-build` snapshot is the local commit `cc7133f6` (upstream `9203eb3a` + the three
+patches, with the submodule changes included as working-tree files). Restore it with:
+
+```bash
+tar -xzf musescore-online-src-cc7133f6.tar.gz -C MuseScore
+cd MuseScore && ./scripts/build.sh
+```
+
+SHA-256: `6d651cc73cc6d3a93728e80e48b6be9fab8ea328d52339088c58e9761bed4541`
+
 ## Build it yourself
 
 Upstream sources are public, so the patches are all you need. Everything is pinned — the
