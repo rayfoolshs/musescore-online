@@ -53,11 +53,15 @@ echo "emsdk:     ${EMSDK_PATH}"
 
 JOBS="${JOBS:-8}"
 
+# A source snapshot extracted from an archive has no git metadata; the build only
+# uses the revision for the About/version string.
+REVISION="${MUSESCORE_REVISION:-$(git rev-parse --short=7 HEAD 2>/dev/null || echo 0000000)}"
+
 # --- editor ---------------------------------------------------------------
 MUSE_APP_BUILD_MODE=dev \
 MUSESCORE_BUILD_CONFIGURATION=app-web \
 MUSESCORE_BUILD_NUMBER=12345678 \
-MUSESCORE_REVISION="$(git rev-parse --short=7 HEAD)" \
+MUSESCORE_REVISION="${REVISION}" \
 MUSESCORE_DOWNLOAD_SOUNDFONT=OFF \
 MUSESCORE_RUN_LRELEASE=OFF \
 MUSESCORE_MODULE_UPDATE=OFF \
