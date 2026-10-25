@@ -45,17 +45,28 @@ The `gh-pages` branch holds the built application that the live demo serves.
 | What | Where |
 |---|---|
 | Changes, docs, scripts | `main` (this branch) |
-| Full patched source tree | release **`web-build`** → `musescore-online-src-cc7133f6.tar.gz` (141 MB, 15,040 files) |
-| Import work (MIDI / MusicXML / `.mscz` / `.mscx`) | `patches/0004-web-import-musescore.patch` + `patches/0005-web-import-muse.patch`, applied on top of the snapshot above |
+| Full source tree **with score import** (current) | release **`web-build-import`** → `musescore-online-src-import-694fa6b.tar.gz` (141 MB, 15,038 files) |
+| Original web-build source tree (no import) | release **`web-build`** → `musescore-online-src-cc7133f6.tar.gz` (141 MB, 15,040 files) |
+| Import changes as patches | `patches/0004-web-import-musescore.patch` + `patches/0005-web-import-muse.patch` |
 | Built app | `gh-pages` + the live site |
 
-The `web-build` snapshot is the local commit `cc7133f6` (upstream `9203eb3a` + the three
-patches, with the submodule changes included as working-tree files). Restore it with:
+`web-build-import` is upstream `9203eb3a` + patches 0001–0005 with the submodule changes
+included as working-tree files (no build outputs). Restore it with:
+
+```bash
+tar -xzf musescore-online-src-import-694fa6b.tar.gz -C MuseScore
+cd MuseScore && ./scripts/build.sh
+```
+
+SHA-256: `efedd0bce3609c79ddf8fa90dc25611a9730d90708617fe928f3f22efd935d31`
+
+The older `web-build` snapshot (local commit `cc7133f6`, patches 0001–0003 only) needs the
+import patches applied by hand:
 
 ```bash
 tar -xzf musescore-online-src-cc7133f6.tar.gz -C MuseScore
 cd MuseScore
-git apply /path/to/patches/0004-web-import-musescore.patch   # optional: score import
+git apply /path/to/patches/0004-web-import-musescore.patch
 git apply /path/to/patches/0005-web-import-muse.patch
 ./scripts/build.sh
 ```
