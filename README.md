@@ -35,6 +35,8 @@ impractical. This repo therefore contains:
     non-blocking dialogs in the web interactive layer (applies **after** 0002)
 - `BUILD_PLAN.md` — the full write-up: goal, toolchain, build steps, every source repair,
   verification checklist, known issues, deployment notes.
+- `SETUP.md` — recreate the build from an empty folder: prerequisites, the exact commands,
+  verification and troubleshooting.
 - `scripts/build.sh` — rebuilds the app and the audio engine.
 - `LICENSE.txt` — GPLv3.
 
@@ -88,7 +90,8 @@ patches apply to these exact revisions (verified by rebuilding from a fresh clon
 | CMake / Ninja | 4.4.4 / 1.13.2 |
 
 The fastest path (clones the pinned upstream, checks out the right submodule commits, applies
-all patches and drops the build scripts in place):
+all patches and drops the build scripts in place) — see `SETUP.md` for prerequisites,
+troubleshooting and the verification checklist:
 
 ```bash
 ./scripts/fetch.sh MuseScore
