@@ -50,7 +50,7 @@ tar -xzf musescore-online-src-cc7133f6.tar.gz -C MuseScore
 cd MuseScore && ./scripts/build.sh
 ```
 
-SHA-256: `6d651cc73cc6d3a93728e80e48b6be9fab8ea328d52339088c58e9761bed4541`
+SHA-256: `1e2456aab37dac6f3c837e118df74369293b01395d02397b5c06bc04fbf331c1`
 
 ## Build it yourself
 
