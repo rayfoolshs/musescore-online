@@ -61,6 +61,12 @@ cp -r /path/to/patches/../scripts .   # scripts/build.sh + scripts/serve.sh
 Output lands in `muse/build.artifacts/` (editor + audio engine + JS glue + SoundFont), ready for
 static hosting. Run `./scripts/serve.sh` from the checkout root to try it.
 
+To redeploy the live site, publish the current build (replaces the `gh-pages` branch):
+
+```bash
+./scripts/publish.sh            # OWNER/REPO/SITE and MESSAGE are overridable
+```
+
 ## Run locally
 
 ```bash
