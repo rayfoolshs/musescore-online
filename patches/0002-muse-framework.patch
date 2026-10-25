@@ -1,0 +1,728 @@
+diff --git a/framework/audio/common/audiotypes.h b/framework/audio/common/audiotypes.h
+index 92f84e8..75234d4 100644
+--- a/framework/audio/common/audiotypes.h
++++ b/framework/audio/common/audiotypes.h
+@@ -311,12 +311,12 @@ inline bool hasNativeEditorSupport(const AudioResourceMeta& meta)
+     return boolAttribute(meta, HAS_NATIVE_EDITOR_SUPPORT_ATTRIBUTE);
+ }
+ 
+-static const std::map<AudioResourceType, QString> RESOURCE_TYPE_MAP = {
+-    { AudioResourceType::Undefined, "undefined" },
+-    { AudioResourceType::MuseSamplerSoundPack, "muse_sampler_sound_pack" },
+-    { AudioResourceType::FluidSoundfont, "fluid_soundfont" },
+-    { AudioResourceType::VstPlugin, "vst_plugin" },
+-    { AudioResourceType::NativeEffect, "muse_plugin" },
++static const std::map<AudioResourceType, String> RESOURCE_TYPE_MAP = {
++    { AudioResourceType::Undefined, u"undefined" },
++    { AudioResourceType::MuseSamplerSoundPack, u"muse_sampler_sound_pack" },
++    { AudioResourceType::FluidSoundfont, u"fluid_soundfont" },
++    { AudioResourceType::VstPlugin, u"vst_plugin" },
++    { AudioResourceType::NativeEffect, u"muse_plugin" },
+ };
+ 
+ static const AudioResourceId MUSE_REVERB_ID("Muse Reverb");
+diff --git a/framework/audio/common/realtimethreadpool.h b/framework/audio/common/realtimethreadpool.h
+index 6605d0e..6a8de8e 100644
+--- a/framework/audio/common/realtimethreadpool.h
++++ b/framework/audio/common/realtimethreadpool.h
+@@ -71,7 +71,9 @@ public:
+                     }
+                 });
+                 m_workers.push_back(std::move(worker));
++#ifdef MUSE_THREADS_SUPPORT
+                 muse::setThreadPriority(*m_workers.back()->m_thread, ThreadPriority::High);
++#endif
+             }
+         } catch (...) {
+             terminate();
+diff --git a/framework/audio/common/rpc/platform/web/webrpcchannel.cpp b/framework/audio/common/rpc/platform/web/webrpcchannel.cpp
+index e662949..fe229de 100644
+--- a/framework/audio/common/rpc/platform/web/webrpcchannel.cpp
++++ b/framework/audio/common/rpc/platform/web/webrpcchannel.cpp
+@@ -48,7 +48,6 @@ static void rpcSend(const uint8_t* data, size_t size)
+     emscripten::val jsArray = emscripten::val::global("Uint8Array").new_(
+         emscripten::typed_memory_view(size, data)
+         );
+-
+     emscripten::val::module_property("main_worker_rpcSend")(jsArray);
+ }
+ 
+@@ -97,7 +96,7 @@ void WebRpcChannel::process()
+     //noop
+ }
+ 
+-void WebRpcChannel::send(const Msg& msg, const Handler& onResponse)
++void WebRpcChannel::send(const Msg& msg, const ResponseHandler& onResponse)
+ {
+     RPCLOG() << "ctxId: " << msg.ctxId
+              << ", callId: " << msg.callId
+@@ -148,10 +147,6 @@ void WebRpcChannel::receive(const Msg& msg)
+              << ", type: " << to_string(msg.type)
+              << ", data.size: " << msg.data.size();
+ 
+-    // all
+-    if (m_data.listenerAll) {
+-        m_data.listenerAll(msg);
+-    }
+     switch (msg.type) {
+     case MsgType::Stream: {
+         auto it = m_data.onStreams.find(msg.callId);
+@@ -160,13 +155,16 @@ void WebRpcChannel::receive(const Msg& msg)
+         }
+     } break;
+     case MsgType::Request: {
+-        auto it = m_data.onRequests.find(msg.code);
++        auto it = m_data.onRequests.find({ msg.ctxId, msg.code });
+         if (it != m_data.onRequests.end() && it->second) {
+-            it->second(msg);
++            Msg resp = it->second(msg);
++            if (resp.type != MsgType::ResponseDelayed) {
++                send(resp);  // send response
++            }
+         }
+     } break;
+     case MsgType::Notification: {
+-        auto it = m_data.onNotifications.find(msg.code);
++        auto it = m_data.onNotifications.find({ msg.ctxId, msg.code });
+         if (it != m_data.onNotifications.end() && it->second) {
+             it->second(msg);
+         }
+@@ -187,19 +185,14 @@ void WebRpcChannel::receive(const Msg& msg)
+     }
+ }
+ 
+-void WebRpcChannel::onRequest(MsgCode code, Handler h)
+-{
+-    m_data.onRequests[code] = h;
+-}
+-
+-void WebRpcChannel::onNotification(MsgCode code, Handler h)
++void WebRpcChannel::onRequest(CtxId ctxId, MsgCode code, RequestHandler h)
+ {
+-    m_data.onNotifications[code] = h;
++    m_data.onRequests[{ ctxId, code }] = h;
+ }
+ 
+-void WebRpcChannel::listenAll(Handler h)
++void WebRpcChannel::onNotification(CtxId ctxId, MsgCode code, NotificationHandler h)
+ {
+-    m_data.listenerAll = h;
++    m_data.onNotifications[{ ctxId, code }] = h;
+ }
+ 
+ void WebRpcChannel::addStream(std::shared_ptr<IRpcStream> s)
+diff --git a/framework/audio/common/rpc/platform/web/webrpcchannel.h b/framework/audio/common/rpc/platform/web/webrpcchannel.h
+index f91d069..be9fe60 100644
+--- a/framework/audio/common/rpc/platform/web/webrpcchannel.h
++++ b/framework/audio/common/rpc/platform/web/webrpcchannel.h
+@@ -34,10 +34,9 @@ public:
+ 
+     void process() override;
+ 
+-    void send(const Msg& msg, const Handler& onResponse = nullptr) override;
+-    void onRequest(MsgCode code, Handler h) override;
+-    void onNotification(MsgCode code, Handler h) override;
+-    void listenAll(Handler h) override;
++    void send(const Msg& msg, const ResponseHandler& onResponse = nullptr) override;
++    void onRequest(CtxId ctxId, MsgCode code, RequestHandler h) override;
++    void onNotification(CtxId ctxId, MsgCode code, NotificationHandler h) override;
+ 
+     void addStream(std::shared_ptr<IRpcStream> s) override;
+     void removeStream(StreamId id) override;
+@@ -51,10 +50,9 @@ private:
+ 
+     struct RpcData {
+         // msgs
+-        Handler listenerAll;
+-        std::map<MsgCode, Handler> onRequests;
+-        std::map<MsgCode, Handler> onNotifications;
+-        std::map<CallId, Handler> onResponses;
++        std::map<MsgKey, RequestHandler> onRequests;
++        std::map<MsgKey, NotificationHandler> onNotifications;
++        std::map<CallId, ResponseHandler> onResponses;
+ 
+         // stream
+         std::map<StreamId, std::shared_ptr<IRpcStream> > streams;
+diff --git a/framework/audio/driver/platform/web/webaudiodriver.cpp b/framework/audio/driver/platform/web/webaudiodriver.cpp
+index 7fe345c..f1681da 100644
+--- a/framework/audio/driver/platform/web/webaudiodriver.cpp
++++ b/framework/audio/driver/platform/web/webaudiodriver.cpp
+@@ -63,16 +63,6 @@ bool WebAudioDriver::open(const Spec& spec, Spec* activeSpec)
+     return true;
+ }
+ 
+-void WebAudioDriver::resume()
+-{
+-    emscripten::val::module_property("driver")["resume"]();
+-}
+-
+-void WebAudioDriver::suspend()
+-{
+-    emscripten::val::module_property("driver")["suspend"]();
+-}
+-
+ void WebAudioDriver::close()
+ {
+     m_opened = false;
+@@ -94,72 +84,31 @@ async::Channel<WebAudioDriver::Spec> WebAudioDriver::activeSpecChanged() const
+     return m_activeSpecChanged;
+ }
+ 
+-bool WebAudioDriver::setOutputDeviceBufferSize(unsigned int)
++AudioDeviceID WebAudioDriver::defaultDevice() const
+ {
+-    NOT_SUPPORTED;
+-    return false;
+-}
+-
+-async::Notification WebAudioDriver::outputDeviceBufferSizeChanged() const
+-{
+-    static async::Notification n;
+-    return n;
+-}
+-
+-bool WebAudioDriver::setOutputDeviceSampleRate(unsigned int)
+-{
+-    NOT_SUPPORTED;
+-    return false;
+-}
+-
+-async::Notification WebAudioDriver::outputDeviceSampleRateChanged() const
+-{
+-    static async::Notification n;
+-    return n;
++    static AudioDeviceID id("default");
++    return id;
+ }
+ 
+-std::vector<unsigned int> WebAudioDriver::availableOutputDeviceBufferSizes() const
++std::vector<samples_t> WebAudioDriver::availableOutputDeviceBufferSizes() const
+ {
+-    std::vector<unsigned int> sizes;
++    std::vector<samples_t> sizes;
+     sizes.push_back(m_activeSpec.output.samplesPerChannel);
+     return sizes;
+ }
+ 
+-std::vector<unsigned int> WebAudioDriver::availableOutputDeviceSampleRates() const
++std::vector<sample_rate_t> WebAudioDriver::availableOutputDeviceSampleRates() const
+ {
+-    std::vector<unsigned int> sizes;
++    std::vector<sample_rate_t> sizes;
+     sizes.push_back(m_activeSpec.output.sampleRate);
+     return sizes;
+ }
+ 
+-AudioDeviceID WebAudioDriver::outputDevice() const
+-{
+-    static AudioDeviceID id("default");
+-    return id;
+-}
+-
+-bool WebAudioDriver::selectOutputDevice(const AudioDeviceID&)
+-{
+-    NOT_SUPPORTED;
+-    return false;
+-}
+-
+-bool WebAudioDriver::resetToDefaultOutputDevice()
+-{
+-    return true;
+-}
+-
+-async::Notification WebAudioDriver::outputDeviceChanged() const
+-{
+-    static async::Notification n;
+-    return n;
+-}
+-
+ AudioDeviceList WebAudioDriver::availableOutputDevices() const
+ {
+     AudioDeviceList list;
+     AudioDevice d;
+-    d.id = outputDevice();
++    d.id = defaultDevice();
+     d.name = d.id;
+     list.push_back(d);
+     return list;
+diff --git a/framework/audio/driver/platform/web/webaudiodriver.h b/framework/audio/driver/platform/web/webaudiodriver.h
+index d751697..d033d59 100644
+--- a/framework/audio/driver/platform/web/webaudiodriver.h
++++ b/framework/audio/driver/platform/web/webaudiodriver.h
+@@ -42,24 +42,13 @@ public:
+     const Spec& activeSpec() const override;
+     async::Channel<Spec> activeSpecChanged() const override;
+ 
+-    bool setOutputDeviceBufferSize(unsigned int bufferSize) override;
+-    async::Notification outputDeviceBufferSizeChanged() const override;
+-    bool setOutputDeviceSampleRate(unsigned int sampleRate) override;
+-    async::Notification outputDeviceSampleRateChanged() const override;
+-    std::vector<unsigned int> availableOutputDeviceBufferSizes() const override;
+-    std::vector<unsigned int> availableOutputDeviceSampleRates() const override;
+-
+-    AudioDeviceID outputDevice() const override;
+-    bool selectOutputDevice(const AudioDeviceID& id) override;
+-    bool resetToDefaultOutputDevice() override;
+-    async::Notification outputDeviceChanged() const override;
++    AudioDeviceID defaultDevice() const override;
+ 
++    std::vector<samples_t> availableOutputDeviceBufferSizes() const override;
++    std::vector<sample_rate_t> availableOutputDeviceSampleRates() const override;
+     AudioDeviceList availableOutputDevices() const override;
+     async::Notification availableOutputDevicesChanged() const override;
+ 
+-    void resume() override;
+-    void suspend() override;
+-
+ private:
+ 
+     bool m_opened = false;
+diff --git a/framework/audio/engine/internal/contextplayer.cpp b/framework/audio/engine/internal/contextplayer.cpp
+index 907d4ed..4dcb4d0 100644
+--- a/framework/audio/engine/internal/contextplayer.cpp
++++ b/framework/audio/engine/internal/contextplayer.cpp
+@@ -353,13 +353,11 @@ void ContextPlayer::flushAllTracks()
+ void ContextPlayer::prepareAllTracksToPlay(AllTracksReadyCallback allTracksReadyCallback)
+ {
+     ONLY_AUDIO_ENGINE_THREAD;
+-
+     IF_ASSERT_FAILED(m_trackSource) {
+         return;
+     }
+ 
+     m_notYetReadyToPlayTracks.clear();
+-
+     for (const auto& source : m_trackSource->allTracksSources()) {
+         IF_ASSERT_FAILED(source) {
+             continue;
+@@ -370,12 +368,10 @@ void ContextPlayer::prepareAllTracksToPlay(AllTracksReadyCallback allTracksReady
+         }
+ 
+         source->prepareToPlay();
+-
+         if (!source->readyToPlay()) {
+             m_notYetReadyToPlayTracks.insert(source);
+         }
+     }
+-
+     if (m_notYetReadyToPlayTracks.empty()) {
+         allTracksReadyCallback();
+         return;
+diff --git a/framework/audio/engine/internal/synthesizers/fluidsynth/fluidresolver.cpp b/framework/audio/engine/internal/synthesizers/fluidsynth/fluidresolver.cpp
+index ffef692..327c5b4 100644
+--- a/framework/audio/engine/internal/synthesizers/fluidsynth/fluidresolver.cpp
++++ b/framework/audio/engine/internal/synthesizers/fluidsynth/fluidresolver.cpp
+@@ -58,8 +58,24 @@ ISynthesizerPtr FluidResolver::resolveSynth(const TrackId /*trackId*/, const Aud
+ 
+     auto search = m_resourcesCache.find(params.resourceMeta.id);
+     if (search == m_resourcesCache.end()) {
+-        LOGE() << "Not found: " << params.resourceMeta.id;
+-        return nullptr;
++        //! NOTE A score references its soundfont by name (usually "MS Basic.sf3").
++        //! When only one General MIDI bank is available under a different name
++        //! (e.g. the web build ships FluidR3), fall back to that whole-soundfont
++        //! resource instead of failing to create the synthesizer.
++        search = m_resourcesCache.end();
++        for (auto it = m_resourcesCache.begin(); it != m_resourcesCache.end(); ++it) {
++            if (!it->second.preset) {
++                search = it;
++                break;
++            }
++        }
++        if (search == m_resourcesCache.end() && !m_resourcesCache.empty()) {
++            search = m_resourcesCache.begin();
++        }
++        if (search == m_resourcesCache.end()) {
++            LOGE() << "Not found: " << params.resourceMeta.id;
++            return nullptr;
++        }
+     }
+ 
+     FluidSynthPtr synth = std::make_shared<FluidSynth>(params);
+diff --git a/framework/audio/engine/internal/synthesizers/soundfontrepository.h b/framework/audio/engine/internal/synthesizers/soundfontrepository.h
+index 4331cad..16636d4 100644
+--- a/framework/audio/engine/internal/synthesizers/soundfontrepository.h
++++ b/framework/audio/engine/internal/synthesizers/soundfontrepository.h
+@@ -24,8 +24,10 @@
+ 
+ #include "audio/engine/isoundfontrepository.h"
+ 
++#include "async/asyncable.h"
++
+ namespace muse::audio::synth {
+-class SoundFontRepository : public ISoundFontRepository
++class SoundFontRepository : public ISoundFontRepository, public muse::async::Asyncable
+ {
+ public:
+     void loadSoundFonts(const std::vector<SoundFontUri>& uris) override;
+diff --git a/framework/audio/main/audiomodule.cpp b/framework/audio/main/audiomodule.cpp
+index 1653500..440ac23 100644
+--- a/framework/audio/main/audiomodule.cpp
++++ b/framework/audio/main/audiomodule.cpp
+@@ -74,8 +74,10 @@ void AudioModule::registerExports()
+     m_configuration = std::make_shared<AudioConfiguration>();
+     m_audioDriverController = std::make_shared<AudioDriverController>();
+ 
++#ifndef Q_OS_WASM
+     m_engineGlobalSetup = std::make_shared<engine::EngineGlobalSetup>();
+     m_engineGlobalSetup->registerExports();
++#endif
+ 
+ #ifdef Q_OS_WASM
+     m_rpcChannel = std::make_shared<rpc::WebRpcChannel>();
+@@ -99,7 +101,9 @@ void AudioModule::registerExports()
+ 
+ void AudioModule::resolveImports()
+ {
++#ifndef Q_OS_WASM
+     m_engineGlobalSetup->resolveImports();
++#endif
+ 
+     auto cr = globalIoc()->resolve<muse::rcommand::ICommandsRegister>(mname);
+     if (cr) {
+@@ -143,7 +147,9 @@ void AudioModule::onDeinit()
+ {
+     m_rpcTicker.stop();
+     m_startAudioController->stopAudioProcessing();
++#ifndef Q_OS_WASM
+     m_engineGlobalSetup->onDeinit();
++#endif
+ }
+ 
+ modularity::IContextSetup* AudioModule::newContext(const muse::modularity::ContextPtr& ctx) const
+diff --git a/framework/audio/main/platform/web/websoundfontcontroller.cpp b/framework/audio/main/platform/web/websoundfontcontroller.cpp
+index bd5e03f..d155ca5 100644
+--- a/framework/audio/main/platform/web/websoundfontcontroller.cpp
++++ b/framework/audio/main/platform/web/websoundfontcontroller.cpp
+@@ -44,6 +44,6 @@ void WebSoundFontController::addSoundFont(const synth::SoundFontUri& uri)
+             return;
+         }
+ 
+-        channel()->send(rpc::make_request(Method::AddSoundFontData, RpcPacker::pack(uri, rv.val)));
++        channel()->send(rpc::make_request(rpc::GLOBAL_CTX_ID, rpc::MsgCode::AddSoundFontData, RpcPacker::pack(uri, rv.val)));
+     });
+ }
+diff --git a/framework/audio/main/platform/web/websoundfontcontroller.h b/framework/audio/main/platform/web/websoundfontcontroller.h
+index 782a1c3..84a7f9d 100644
+--- a/framework/audio/main/platform/web/websoundfontcontroller.h
++++ b/framework/audio/main/platform/web/websoundfontcontroller.h
+@@ -31,7 +31,7 @@
+ namespace muse::audio {
+ class WebSoundFontController : public ISoundFontController, public async::Asyncable
+ {
+-    ContextInject<rpc::IRpcChannel> channel;
++    GlobalInject<rpc::IRpcChannel> channel;
+ 
+ public:
+     WebSoundFontController() = default;
+diff --git a/framework/audio/thirdparty/moodycamel/lightweightsemaphore.h b/framework/audio/thirdparty/moodycamel/lightweightsemaphore.h
+index dcaf945..222ae65 100644
+--- a/framework/audio/thirdparty/moodycamel/lightweightsemaphore.h
++++ b/framework/audio/thirdparty/moodycamel/lightweightsemaphore.h
+@@ -166,6 +166,61 @@ public:
+         }
+     }
+ };
++#elif defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
++//---------------------------------------------------------
++// Semaphore (Emscripten single-threaded WebAssembly)
++// There is only one thread, so a semaphore degenerates to an
++// atomic counter and no blocking is ever required.
++//---------------------------------------------------------
++class Semaphore
++{
++private:
++    std::atomic<std::int64_t> m_count;
++
++    Semaphore(const Semaphore& other) MOODYCAMEL_DELETE_FUNCTION;
++    Semaphore& operator=(const Semaphore& other) MOODYCAMEL_DELETE_FUNCTION;
++
++public:
++    Semaphore(int initialCount = 0)
++        : m_count(initialCount)
++    {
++        assert(initialCount >= 0);
++    }
++
++    ~Semaphore() {}
++
++    bool wait()
++    {
++        std::int64_t c = m_count.load(std::memory_order_relaxed);
++        while (c > 0) {
++            if (m_count.compare_exchange_weak(c, c - 1, std::memory_order_relaxed)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    bool try_wait()
++    {
++        return wait();
++    }
++
++    bool timed_wait(std::uint64_t /*usecs*/)
++    {
++        return wait();
++    }
++
++    void signal()
++    {
++        m_count.fetch_add(1, std::memory_order_relaxed);
++    }
++
++    void signal(int count)
++    {
++        m_count.fetch_add(count, std::memory_order_relaxed);
++    }
++};
++
+ #elif defined(__unix__) || defined(__MVS__)
+ //---------------------------------------------------------
+ // Semaphore (POSIX, Linux, zOS)
+diff --git a/framework/cmake/MuseSetupConfiguration.cmake b/framework/cmake/MuseSetupConfiguration.cmake
+index 4bea75d..fb95f91 100644
+--- a/framework/cmake/MuseSetupConfiguration.cmake
++++ b/framework/cmake/MuseSetupConfiguration.cmake
+@@ -74,4 +74,5 @@ endif()
+ 
+ configure_file(${CMAKE_CURRENT_LIST_DIR}/muse_framework_config.h.in muse_framework_config.h )
+ 
++include(DeclareModuleSetup)  # legacy declare_module/setup_module macros (used by web/appshell)
+ include(${CMAKE_CURRENT_LIST_DIR}/MuseCreateModule.cmake)
+diff --git a/framework/global/internal/baseapplication.cpp b/framework/global/internal/baseapplication.cpp
+index 2937d94..87a613e 100644
+--- a/framework/global/internal/baseapplication.cpp
++++ b/framework/global/internal/baseapplication.cpp
+@@ -168,7 +168,6 @@ void BaseApplication::doSetup(const std::shared_ptr<CmdOptions>& options)
+     // ====================================================
+     // Setup modules: Resources, Exports, Imports, UiTypes
+     // ====================================================
+-
+     modularity::globalIoc()->registerExport<IApplication>("global", shared_from_this());
+ 
+     m_globalModule = new GlobalModule();
+@@ -180,7 +179,6 @@ void BaseApplication::doSetup(const std::shared_ptr<CmdOptions>& options)
+         m->registerResources();
+         m->registerExports();
+     }
+-
+     m_globalModule->resolveImports();
+     m_globalModule->registerApi();
+     for (modularity::IModuleSetup* m : m_modules) {
+diff --git a/framework/global/settings.cpp b/framework/global/settings.cpp
+index d41000d..6fe6ef2 100644
+--- a/framework/global/settings.cpp
++++ b/framework/global/settings.cpp
+@@ -22,10 +22,12 @@
+ 
+ #include "settings.h"
+ 
++#ifndef NO_QT_SUPPORT
+ #include <QDateTime>
+ #include <QSettings>
+ #include <QStandardPaths>
+ #include <QDir>
++#endif
+ 
+ #ifdef MUSE_MODULE_MULTIWINDOWS
+ #include "multiwindows/resourcelockguard.h"
+@@ -48,6 +50,7 @@ Settings* Settings::instance()
+ 
+ Settings::Settings()
+ {
++#ifndef NO_QT_SUPPORT
+ #ifdef WIN_PORTABLE
+     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, dataPath());
+     QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, dataPath());
+@@ -58,16 +61,23 @@ Settings::Settings()
+ #endif
+ 
+     m_settings = new QSettings();
++#endif // NO_QT_SUPPORT
+ }
+ 
+ Settings::~Settings()
+ {
++#ifndef NO_QT_SUPPORT
+     delete m_settings;
++#endif
+ }
+ 
+ io::path_t Settings::filePath() const
+ {
++#ifndef NO_QT_SUPPORT
+     return m_settings->fileName();
++#else
++    return {};
++#endif
+ }
+ 
+ const Settings::Items& Settings::items() const
+@@ -94,7 +104,9 @@ void Settings::load()
+ 
+ void Settings::reset(bool keepDefaultSettings, bool notifyAboutChanges, bool notifyOtherInstances)
+ {
++#ifndef NO_QT_SUPPORT
+     m_settings->clear();
++#endif
+ 
+     m_isTransactionStarted = false;
+ 
+@@ -111,10 +123,14 @@ void Settings::reset(bool keepDefaultSettings, bool notifyAboutChanges, bool not
+ 
+     m_localSettings.clear();
+ 
++#ifndef NO_QT_SUPPORT
+     if (!keepDefaultSettings) {
+         QDir(dataPath()).removeRecursively();
+         QDir().mkpath(dataPath());
+     }
++#else
++    UNUSED(keepDefaultSettings);
++#endif
+ 
+     if (!notifyAboutChanges) {
+         return;
+@@ -144,6 +160,7 @@ void Settings::reset(bool keepDefaultSettings, bool notifyAboutChanges, bool not
+ #endif
+ }
+ 
++#ifndef NO_QT_SUPPORT
+ static Val compat_QVariantToVal(const QVariant& var)
+ {
+     if (!var.isValid()) {
+@@ -167,10 +184,12 @@ static Val compat_QVariantToVal(const QVariant& var)
+ 
+     return Val::fromQVariant(var);
+ }
++#endif // NO_QT_SUPPORT
+ 
+ Settings::Items Settings::readItems() const
+ {
+     Items result;
++#ifndef NO_QT_SUPPORT
+ #ifdef MUSE_MODULE_MULTIWINDOWS
+     muse::mi::ReadResourceLockGuard resource_lock(multiwindowsProvider.get(), SETTINGS_RESOURCE_NAME);
+ #endif
+@@ -181,6 +200,10 @@ Settings::Items Settings::readItems() const
+ 
+         result[item.key] = item;
+     }
++#else
++    //! No persistence without Qt: use the in-memory items.
++    result = m_items;
++#endif
+ 
+     return result;
+ }
+@@ -236,9 +259,15 @@ void Settings::writeValue(const Key& key, const Val& value)
+     muse::mi::WriteResourceLockGuard resource_lock(multiwindowsProvider.get(), SETTINGS_RESOURCE_NAME);
+ #endif
+     // TODO: implement writing/reading first part of key (module name)
++#ifndef NO_QT_SUPPORT
+     m_settings->setValue(QString::fromStdString(key.key), value.toQVariant());
++#else
++    UNUSED(key);
++    UNUSED(value);
++#endif
+ }
+ 
++#ifndef NO_QT_SUPPORT
+ QString Settings::dataPath() const
+ {
+ #ifdef WIN_PORTABLE
+@@ -247,6 +276,7 @@ QString Settings::dataPath() const
+     return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+ #endif
+ }
++#endif // NO_QT_SUPPORT
+ 
+ void Settings::setDefaultValue(const Key& key, const Val& value)
+ {
+diff --git a/framework/global/settings.h b/framework/global/settings.h
+index ce6256c..84e1420 100644
+--- a/framework/global/settings.h
++++ b/framework/global/settings.h
+@@ -122,9 +122,13 @@ private:
+     Items readItems() const;
+     void writeValue(const Key& key, const Val& value);
+ 
++#ifndef NO_QT_SUPPORT
++    //! Qt is unavailable in some configurations (e.g. the WASM audio engine);
++    //! settings are then kept in memory only.
+     QString dataPath() const;
+ 
+     QSettings* m_settings = nullptr;
++#endif
+     mutable Items m_items;
+     mutable Items m_localSettings;
+     mutable bool m_isTransactionStarted = false;
+diff --git a/framework/interactive/internal/platform/web/webinteractive.cpp b/framework/interactive/internal/platform/web/webinteractive.cpp
+index 9eb5761..7aafeab 100644
+--- a/framework/interactive/internal/platform/web/webinteractive.cpp
++++ b/framework/interactive/internal/platform/web/webinteractive.cpp
+@@ -366,32 +366,17 @@ std::vector<Uri> WebInteractive::stack() const
+     return m_origin->stack();
+ }
+ 
+-Ret WebInteractive::openUrl(const std::string& url) const
++async::Notification WebInteractive::currentUriAboutToBeChanged() const
+ {
+-    return openUrl(QUrl(QString::fromStdString(url)));
++    return m_origin->currentUriAboutToBeChanged();
+ }
+ 
+-Ret WebInteractive::openUrl(const QUrl& url) const
++QWindow* WebInteractive::topWindow() const
+ {
+-    return m_origin->openUrl(url);
++    return m_origin->topWindow();
+ }
+ 
+-Ret WebInteractive::isAppExists(const std::string& appIdentifier) const
++bool WebInteractive::topWindowIsWidget() const
+ {
+-    return m_origin->isAppExists(appIdentifier);
+-}
+-
+-Ret WebInteractive::canOpenApp(const UriQuery& uri) const
+-{
+-    return m_origin->canOpenApp(uri);
+-}
+-
+-async::Promise<Ret> WebInteractive::openApp(const UriQuery& uri) const
+-{
+-    return m_origin->openApp(uri);
+-}
+-
+-Ret WebInteractive::revealInFileBrowser(const io::path_t& filePath) const
+-{
+-    return m_origin->revealInFileBrowser(filePath);
++    return m_origin->topWindowIsWidget();
+ }
+diff --git a/framework/interactive/internal/platform/web/webinteractive.h b/framework/interactive/internal/platform/web/webinteractive.h
+index eec7371..5a9a329 100644
+--- a/framework/interactive/internal/platform/web/webinteractive.h
++++ b/framework/interactive/internal/platform/web/webinteractive.h
+@@ -106,16 +106,11 @@ public:
+ 
+     muse::ValCh<muse::Uri> currentUri() const override;
+     muse::RetVal<bool> isCurrentUriDialog() const override;
++    muse::async::Notification currentUriAboutToBeChanged() const override;
+     std::vector<muse::Uri> stack() const override;
+ 
+-    muse::Ret openUrl(const std::string& url) const override;
+-    muse::Ret openUrl(const QUrl& url) const override;
+-
+-    muse::Ret isAppExists(const std::string& appIdentifier) const override;
+-    muse::Ret canOpenApp(const muse::UriQuery& uri) const override;
+-    muse::async::Promise<muse::Ret> openApp(const muse::UriQuery& uri) const override;
+-
+-    muse::Ret revealInFileBrowser(const muse::io::path_t& filePath) const override;
++    QWindow* topWindow() const override;
++    bool topWindowIsWidget() const override;
+ 
+ private:
+ 

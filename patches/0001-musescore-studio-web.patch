@@ -1,0 +1,2503 @@
+diff --git a/SetupConfigure.cmake b/SetupConfigure.cmake
+index 1d115df4..232c352b 100644
+--- a/SetupConfigure.cmake
++++ b/SetupConfigure.cmake
+@@ -127,6 +127,10 @@ if(BUILD_CONFIGURATION STREQUAL "APP-WEB")
+         set(MUSE_THREADS_SUPPORT ON)
+     endif()
+ 
++    # WASM needs static third-party deps (freetype, harfbuzz, etc.) — shared libs (.so) can't link into WASM
++    set(MUSE_MODULE_DRAW_USE_STATIC_DEPS ON)
++    set(BUILD_SHARED_LIBS OFF)
++
+     set(MUSE_MODULE_UI_SYSTEMDRAG_SUPPORTED OFF)
+     set(MUSE_MODULE_INTERACTIVE_SYNC_SUPPORTED OFF)
+ 
+@@ -176,14 +180,16 @@ if(BUILD_CONFIGURATION STREQUAL "APP-WEB")
+     set(MUE_BUILD_IMPEXP_BB_MODULE OFF)
+     set(MUE_BUILD_IMPEXP_BWW_MODULE OFF)
+     set(MUE_BUILD_IMPEXP_CAPELLA_MODULE OFF)
+-    set(MUE_BUILD_IMPEXP_MIDI_MODULE OFF)
++    # MusicXML and MIDI writers are needed for the web export actions
++    set(MUE_BUILD_IMPEXP_MIDI_MODULE ON)
+     set(MUE_BUILD_IMPEXP_MLSCORE_MODULE OFF)
+     set(MUE_BUILD_IMPEXP_MNX_MODULE OFF)
+     set(MUE_BUILD_IMPEXP_MUSEDATA_MODULE OFF)
+-    set(MUE_BUILD_IMPEXP_MUSICXML_MODULE OFF)
++    set(MUE_BUILD_IMPEXP_MUSICXML_MODULE ON)
+     set(MUE_BUILD_IMPEXP_OVE_MODULE OFF)
+     set(MUE_BUILD_IMPEXP_AUDIOEXPORT_MODULE OFF)
+-    set(MUE_BUILD_IMPEXP_IMAGESEXPORT_MODULE OFF)
++    # PDF writer backs the web "Print" action
++    set(MUE_BUILD_IMPEXP_IMAGESEXPORT_MODULE ON)
+     set(MUE_BUILD_IMPEXP_GUITARPRO_MODULE OFF)
+     set(MUE_BUILD_IMPEXP_MEI_MODULE OFF)
+     set(MUE_BUILD_IMPEXP_VIDEOEXPORT_MODULE OFF)
+diff --git a/muse b/muse
+--- a/muse
++++ b/muse
+@@ -1 +1 @@
+-Subproject commit 3e0eae57a9aa3dedb0a1e1d05d3ebf0cbc1b5e36
++Subproject commit 3e0eae57a9aa3dedb0a1e1d05d3ebf0cbc1b5e36-dirty
+diff --git a/muse_deps b/muse_deps
+--- a/muse_deps
++++ b/muse_deps
+@@ -1 +1 @@
+-Subproject commit bf433c8f4f6f9d9897aa78d9fddcb2bbd02e42dc
++Subproject commit bf433c8f4f6f9d9897aa78d9fddcb2bbd02e42dc-dirty
+diff --git a/src/app/CMakeLists.txt b/src/app/CMakeLists.txt
+index be093c92..f77b47e1 100644
+--- a/src/app/CMakeLists.txt
++++ b/src/app/CMakeLists.txt
+@@ -218,10 +218,13 @@ set(APP_SRC
+     internal/guiapp.h
+ )
+ 
++set(APP_SRC ${APP_SRC}
++    internal/commandlineparser.cpp
++    internal/commandlineparser.h
++)
++
+ if (MUE_ENABLE_CONSOLEAPP)
+     set(APP_SRC ${APP_SRC}
+-        internal/commandlineparser.cpp
+-        internal/commandlineparser.h
+         internal/consoleapp.cpp
+         internal/consoleapp.h
+     )
+@@ -316,6 +319,8 @@ if (CC_IS_EMCC)
+     include(exported_functions.cmake)
+     target_link_options(MuseScoreStudio PRIVATE ${EMCC_LINKER_FLAGS})
+     target_link_options(MuseScoreStudio PRIVATE ${EXPORTED_FUNCTIONS})
++    # Emit a function-index -> name map for decoding runtime stack traces.
++    target_link_options(MuseScoreStudio PRIVATE "--emit-symbol-map")
+ endif()
+ 
+ 
+diff --git a/src/app/internal/guiapp.cpp b/src/app/internal/guiapp.cpp
+index a3cb94a4..938daec4 100644
+--- a/src/app/internal/guiapp.cpp
++++ b/src/app/internal/guiapp.cpp
+@@ -97,7 +97,13 @@ std::shared_ptr<muse::CmdOptions> MuseScoreGuiApp::makeContextOptions(const muse
+ 
+ QString MuseScoreGuiApp::mainWindowQmlPath(const QString& platform) const
+ {
++#ifdef Q_OS_WASM
++    // The web appshell ships a single Main.qml (no per-platform variants).
++    Q_UNUSED(platform)
++    return QString(":/qml/Main.qml");
++#else
+     return QString(":/qt/qml/MuseScore/AppShell/platform/%1/Main.qml").arg(platform);
++#endif
+ }
+ 
+ void MuseScoreGuiApp::doStartupScenario(const muse::modularity::ContextPtr& ctxId)
+diff --git a/src/app/main.cpp b/src/app/main.cpp
+index 32651d64..561722bd 100644
+--- a/src/app/main.cpp
++++ b/src/app/main.cpp
+@@ -26,6 +26,10 @@
+ #include <QStyleHints>
+ #include <QQuickWindow>
+ #include <QSslSocket>
++#ifndef Q_OS_WASM
++// SSL is not available in Qt for WebAssembly
++#define MUSE_SSL_AVAILABLE
++#endif
+ 
+ #include "appfactory.h"
+ #include "internal/commandlineparser.h"
+@@ -202,11 +206,15 @@ int main(int argc, char** argv)
+                 app->setupNewContext();
+ 
+                 LOGI() << QString("SSL Info: supported: %1, build: %2, runtime: %3, active backend: %4, available backends: %5")
++#ifdef MUSE_SSL_AVAILABLE
+                     .arg(QSslSocket::supportsSsl())
+                     .arg(QSslSocket::sslLibraryBuildVersionString())
+                     .arg(QSslSocket::sslLibraryVersionString())
+                     .arg(QSslSocket::activeBackend())
+                     .arg(QSslSocket::availableBackends().join(", "));
++#else
++                    .arg("N/A (WebAssembly)").arg("N/A").arg("N/A").arg("N/A").arg("N/A");
++#endif
+             }, Qt::QueuedConnection);
+         }, Qt::QueuedConnection);
+     }, Qt::QueuedConnection);
+diff --git a/src/app/webapi_export.cpp b/src/app/webapi_export.cpp
+index 3d3d05b5..30a2a8ac 100644
+--- a/src/app/webapi_export.cpp
++++ b/src/app/webapi_export.cpp
+@@ -30,12 +30,24 @@ extern "C" {
+ EMSCRIPTEN_KEEPALIVE
+ void load(const void* source, unsigned int len) { WebApi::instance()->load(source, len); }
+ 
++EMSCRIPTEN_KEEPALIVE
++void loadFromPath(const char* path) { WebApi::instance()->loadFromPath(std::string(path)); }
++
+ EMSCRIPTEN_KEEPALIVE
+ void addSoundFont(const char* uri)
+ {
+     WebApi::instance()->addSoundFont(std::string(uri));
+ }
+ 
++EMSCRIPTEN_KEEPALIVE
++void saveScore() { WebApi::instance()->saveScore(); }
++
++EMSCRIPTEN_KEEPALIVE
++void saveScoreAs(const char* fileName) { WebApi::instance()->saveScoreAs(std::string(fileName)); }
++
++EMSCRIPTEN_KEEPALIVE
++void dispatchCommand(const char* command) { WebApi::instance()->dispatchCommand(std::string(command)); }
++
+ EMSCRIPTEN_KEEPALIVE
+ void startAudioProcessing() { WebApi::instance()->startAudioProcessing(); }
+ }
+diff --git a/src/engraving/api/v1/qmlpluginapi.cpp b/src/engraving/api/v1/qmlpluginapi.cpp
+index d64ad4a2..e8ad5a12 100644
+--- a/src/engraving/api/v1/qmlpluginapi.cpp
++++ b/src/engraving/api/v1/qmlpluginapi.cpp
+@@ -207,7 +207,9 @@ void PluginAPI::registerQmlTypes()
+     qmlRegisterAnonymousType<OrnamentIntervalWrapper>("MuseScore", 3);
+     qRegisterMetaType<OrnamentIntervalWrapper*>("OrnamentIntervalWrapper*");
+ 
++#ifdef QT_QPROCESS_SUPPORTED
+     qmlRegisterType<MsProcess>("MuseScore", 3, 0, "QProcess");
++#endif
+     qmlRegisterType<FileIO, 1>("FileIO",    3, 0, "FileIO");
+ 
+     qmlTypesRegistered = true;
+diff --git a/src/engraving/api/v1/util.cpp b/src/engraving/api/v1/util.cpp
+index a0e1e5da..a5ccc091 100644
+--- a/src/engraving/api/v1/util.cpp
++++ b/src/engraving/api/v1/util.cpp
+@@ -358,6 +358,7 @@ int FileIO::modifiedTime()
+     return fileInfo.lastModified().toSecsSinceEpoch();
+ }
+ 
++#ifdef QT_QPROCESS_SUPPORTED
+ void MsProcess::start(const QString& command)
+ {
+     QT_WARNING_PUSH;
+@@ -371,4 +372,5 @@ void MsProcess::startWithArgs(const QString& program, const QStringList& args)
+ {
+     QProcess::start(program, args, ReadWrite);
+ }
++#endif // QT_QPROCESS_SUPPORTED
+ }
+diff --git a/src/engraving/api/v1/util.h b/src/engraving/api/v1/util.h
+index 52e463db..8c46fef1 100644
+--- a/src/engraving/api/v1/util.h
++++ b/src/engraving/api/v1/util.h
+@@ -23,7 +23,10 @@
+ #pragma once
+ 
+ #include <QDir>
++
++#ifdef QT_QPROCESS_SUPPORTED
+ #include <QProcess>
++#endif
+ 
+ #include "global/modularity/ioc.h"
+ #include "global/iglobalconfiguration.h"
+@@ -163,6 +166,7 @@ private:
+ ///   plugin to be platform dependant. \since MuseScore 3.2
+ //---------------------------------------------------------
+ 
++#ifdef QT_QPROCESS_SUPPORTED
+ class MsProcess : public QProcess
+ {
+     Q_OBJECT
+@@ -186,4 +190,5 @@ public slots:
+     /// --
+     Q_INVOKABLE QByteArray readAllStandardOutput() { return QProcess::readAllStandardOutput(); }
+ };
++#endif // QT_QPROCESS_SUPPORTED
+ }
+diff --git a/src/engraving/engravingmodule.cpp b/src/engraving/engravingmodule.cpp
+index 9b3b6e2d..936f71cb 100644
+--- a/src/engraving/engravingmodule.cpp
++++ b/src/engraving/engravingmodule.cpp
+@@ -239,6 +239,37 @@ void EngravingModule::onInit(const IApplication::RunMode&)
+         fdb->insertSubstitution(u"Finale Broadway Text", u"MuseJazz Text");
+         fdb->insertSubstitution(u"ScoreFont",      u"Leland Text");// alias for current Musical Text Font
+ 
++        //! Common desktop text fonts are not necessarily installed (notably in the
++        //! WebAssembly build, where there is no system font directory). Without a
++        //! substitution Qt falls back to the registered music font (Bravura), whose
++        //! ASCII range maps letters to musical symbols (e.g. 'o' renders as a notehead).
++        //! Map them to the bundled, metric-compatible text fonts.
++        fdb->insertSubstitution(u"Times New Roman",     u"FreeSerif");
++        fdb->insertSubstitution(u"Times",               u"FreeSerif");
++        fdb->insertSubstitution(u"Georgia",             u"FreeSerif");
++        fdb->insertSubstitution(u"Garamond",            u"FreeSerif");
++        fdb->insertSubstitution(u"Palatino Linotype",   u"FreeSerif");
++        fdb->insertSubstitution(u"Palatino",            u"FreeSerif");
++        fdb->insertSubstitution(u"Book Antiqua",        u"FreeSerif");
++        fdb->insertSubstitution(u"Cambria",             u"FreeSerif");
++        fdb->insertSubstitution(u"Century Schoolbook",  u"FreeSerif");
++
++        fdb->insertSubstitution(u"Arial",               u"FreeSans");
++        fdb->insertSubstitution(u"Helvetica",           u"FreeSans");
++        fdb->insertSubstitution(u"Verdana",             u"FreeSans");
++        fdb->insertSubstitution(u"Tahoma",              u"FreeSans");
++        fdb->insertSubstitution(u"Calibri",             u"FreeSans");
++        fdb->insertSubstitution(u"Segoe UI",            u"FreeSans");
++        fdb->insertSubstitution(u"Trebuchet MS",        u"FreeSans");
++        fdb->insertSubstitution(u"Comic Sans MS",       u"FreeSans");
++        fdb->insertSubstitution(u"Lucida Sans Unicode", u"FreeSans");
++
++        fdb->insertSubstitution(u"Courier New",         u"DejaVu Sans Mono");
++        fdb->insertSubstitution(u"Courier",             u"DejaVu Sans Mono");
++        fdb->insertSubstitution(u"Consolas",            u"DejaVu Sans Mono");
++        fdb->insertSubstitution(u"Monaco",              u"DejaVu Sans Mono");
++        fdb->insertSubstitution(u"Lucida Console",      u"DejaVu Sans Mono");
++
+         // Symbols
+         Smufl::init();
+ 
+diff --git a/src/project/internal/convertfiletoscoreservice.cpp b/src/project/internal/convertfiletoscoreservice.cpp
+index 6aec3ed8..a1a57463 100644
+--- a/src/project/internal/convertfiletoscoreservice.cpp
++++ b/src/project/internal/convertfiletoscoreservice.cpp
+@@ -120,6 +120,13 @@ void ConvertFileToScoreService::init()
+ {
+     TRACEFUNC;
+ 
++    //! NOTE: The cloud service is not available in every configuration
++    //! (e.g. the web build ships a cloud stub), in which case this feature is disabled.
++    if (!museScoreComService()) {
++        LOGW() << "MuseScore.com service is not available, conversion feature disabled";
++        return;
++    }
++
+     m_timer.setInterval(MIN_RETRY_INTERVAL_MS); // poll once a minute
+ 
+     QObject::connect(&m_timer, &QTimer::timeout, [this]() { poll(); });
+diff --git a/src/project/projectmodule.cpp b/src/project/projectmodule.cpp
+index 262b6bc8..ad0a1756 100644
+--- a/src/project/projectmodule.cpp
++++ b/src/project/projectmodule.cpp
+@@ -180,7 +180,6 @@ void ProjectContext::onInit(const IApplication::RunMode& mode)
+     if (IApplication::RunMode::GuiApp != mode) {
+         return;
+     }
+-
+     m_actionsController->init();
+     m_recentFilesController->init();
+     m_projectAutoSaver->init();
+diff --git a/src/web/appjs/appjsmodule.cpp b/src/web/appjs/appjsmodule.cpp
+index f4028bb8..0fbf2ecf 100644
+--- a/src/web/appjs/appjsmodule.cpp
++++ b/src/web/appjs/appjsmodule.cpp
+@@ -25,9 +25,13 @@
+ 
+ #include "webapi.h"
+ 
++#include "rcommand/icommanddispatcher.h"
++
+ using namespace muse;
+ using namespace mu::appjs;
+ 
++static const std::string mname("appjs");
++
+ std::string AppJsModule::moduleName() const
+ {
+     return "appjs";
+@@ -35,10 +39,68 @@ std::string AppJsModule::moduleName() const
+ 
+ void AppJsModule::onInit(const muse::IApplication::RunMode&)
+ {
+-    WebApi::instance()->init();
++    // WebApi is initialised per-context in AppJsContext::onInit (it needs a
++    // real context to resolve contextual services).
+ }
+ 
+ void AppJsModule::onDeinit()
++{
++}
++
++modularity::IContextSetup* AppJsModule::newContext(const muse::modularity::ContextPtr& ctx) const
++{
++    return new AppJsContext(ctx);
++}
++
++void AppJsContext::resolveImports()
++{
++    auto cd = ioc()->resolve<muse::rcommand::ICommandDispatcher>(mname);
++    if (!cd) {
++        return;
++    }
++
++    cd->onRequest(this, muse::rcommand::Command("command://web/score-save"), [](const muse::rcommand::Request&) {
++        WebApi::instance()->saveScore();
++        muse::rcommand::Response response;
++        response.ret = muse::make_ret(muse::Ret::Code::Ok);
++        return response;
++    });
++
++    cd->onRequest(this, muse::rcommand::Command("command://web/score-save-as"), [](const muse::rcommand::Request&) {
++        WebApi::instance()->requestSaveAs();
++        muse::rcommand::Response response;
++        response.ret = muse::make_ret(muse::Ret::Code::Ok);
++        return response;
++    });
++
++    cd->onRequest(this, muse::rcommand::Command("command://web/export-musicxml"), [](const muse::rcommand::Request&) {
++        WebApi::instance()->exportScore("musicxml");
++        muse::rcommand::Response response;
++        response.ret = muse::make_ret(muse::Ret::Code::Ok);
++        return response;
++    });
++
++    cd->onRequest(this, muse::rcommand::Command("command://web/print-score"), [](const muse::rcommand::Request&) {
++        WebApi::instance()->printScore();
++        muse::rcommand::Response response;
++        response.ret = muse::make_ret(muse::Ret::Code::Ok);
++        return response;
++    });
++
++    cd->onRequest(this, muse::rcommand::Command("command://web/export-midi"), [](const muse::rcommand::Request&) {
++        WebApi::instance()->exportScore("midi");
++        muse::rcommand::Response response;
++        response.ret = muse::make_ret(muse::Ret::Code::Ok);
++        return response;
++    });
++}
++
++void AppJsContext::onInit(const muse::IApplication::RunMode&)
++{
++    WebApi::instance()->init(iocContext());
++}
++
++void AppJsContext::onDeinit()
+ {
+     WebApi::instance()->deinit();
+ }
+diff --git a/src/web/appjs/appjsmodule.h b/src/web/appjs/appjsmodule.h
+index 7035b680..658a87c6 100644
+--- a/src/web/appjs/appjsmodule.h
++++ b/src/web/appjs/appjsmodule.h
+@@ -22,6 +22,7 @@
+ #pragma once
+ 
+ #include "modularity/imodulesetup.h"
++#include "rcommand/commandable.h"
+ 
+ namespace mu::appjs {
+ class AppJsModule : public muse::modularity::IModuleSetup
+@@ -34,6 +35,20 @@ public:
+     void onDeinit() override;
+     void onStartApp() override;
+ 
+-private:
++    muse::modularity::IContextSetup* newContext(const muse::modularity::ContextPtr& ctx) const override;
++};
++
++// WebApi needs a real context to resolve contextual services (project session,
++// action dispatcher), so initialise it from a context setup rather than the
++// module (which only has the global context).
++class AppJsContext : public muse::modularity::IContextSetup, public muse::rcommand::Commandable
++{
++public:
++    AppJsContext(const muse::modularity::ContextPtr& ctx)
++        : muse::modularity::IContextSetup(ctx) {}
++
++    void resolveImports() override;
++    void onInit(const muse::IApplication::RunMode& mode) override;
++    void onDeinit() override;
+ };
+ }
+diff --git a/src/web/appjs/distr/audiodriver.js b/src/web/appjs/distr/audiodriver.js
+index 438f303b..a6fe081d 100644
+--- a/src/web/appjs/distr/audiodriver.js
++++ b/src/web/appjs/distr/audiodriver.js
+@@ -32,7 +32,7 @@ let AudioDriver = (function () {
+             try {
+ 
+                 const code = await URLFromFiles([
+-                    './MuseAudio.js',
++                    './MuseAudio.js?v=6',
+                     './distr/audio_worklet_processor.js'
+                 ]);
+ 
+diff --git a/src/web/appjs/distr/muapi.js b/src/web/appjs/distr/muapi.js
+index d8652238..7d983fc1 100644
+--- a/src/web/appjs/distr/muapi.js
++++ b/src/web/appjs/distr/muapi.js
+@@ -1,6 +1,6 @@
+ import MuImpl from "./muimpl.js"
+ 
+-const DEFAULT_SOUNDFONT = "sound/MS%20Basic.sf3"
++const DEFAULT_SOUNDFONT = "sound/FluidR3Mono_GM.sf3"
+ 
+ const MuApi = {
+ 
+@@ -8,6 +8,9 @@ const MuApi = {
+     loadScoreFile: MuImpl.loadScoreFile,
+     loadScoreData: MuImpl.loadScoreData,
+ 
++    // Save score with a user-provided file name
++    saveScoreAs: MuImpl.saveScoreAs.bind(MuImpl),
++
+     // Start audio
+     startAudioProcessing: MuImpl.startAudioProcessing.bind(MuImpl),
+ }
+@@ -21,10 +24,31 @@ async function createMuApi(config) {
+ 
+     MuApi.Module = await MuImpl.loadModule(config)
+ 
+-    MuApi.Module.onProjectSaved = function(data) {
+-        console.log("[js muapi internal] onProjectSaved len: ", data.length)
++    MuApi.Module.onProjectSaved = function(name, data) {
++        console.log("[js muapi internal] onProjectSaved: ", name, " len: ", data.length)
+         if (config.onProjectSaved) {
+-            config.onProjectSaved(data)
++            config.onProjectSaved(name, data)
++        }
++    }
++
++    MuApi.Module.onSaveAsRequested = function(suggestedName) {
++        console.log("[js muapi internal] onSaveAsRequested: ", suggestedName)
++        if (config.onSaveAsRequested) {
++            config.onSaveAsRequested(suggestedName)
++        }
++    }
++
++    MuApi.Module.onPrintReady = function(name, data) {
++        console.log("[js muapi internal] onPrintReady: ", name, " len: ", data.length)
++        if (config.onPrintReady) {
++            config.onPrintReady(name, data)
++        }
++    }
++
++    MuApi.Module.onScoreExported = function(name, data) {
++        console.log("[js muapi internal] onScoreExported: ", name, " len: ", data.length)
++        if (config.onScoreExported) {
++            config.onScoreExported(name, data)
+         }
+     }
+ 
+diff --git a/src/web/appjs/distr/muimpl.js b/src/web/appjs/distr/muimpl.js
+index fb300b5e..abfe0b24 100644
+--- a/src/web/appjs/distr/muimpl.js
++++ b/src/web/appjs/distr/muimpl.js
+@@ -145,14 +145,28 @@ const MuImpl = {
+         }
+ 
+         const buffer = await file.arrayBuffer();
+-        this.loadScoreData(new Uint8Array(buffer)) 
++        this.loadScoreData(new Uint8Array(buffer), file.name)
+     },
+ 
+-    loadScoreData: function(data) {
+-        const ptr = this.Module._malloc(data.length);
+-        this.Module.HEAPU8.set(data, ptr);
+-        this.Module._load(ptr, data.length);
+-        this.Module._free(ptr);
++    loadScoreData: function(data, fileName) {
++        const M = this.Module;
++        // Keep the original file name: the score title (and therefore the save/export
++        // file names) is derived from the project path.
++        const safeName = String(fileName || "current.mscz").replace(/[\\/]/g, "_");
++        const path = "/mu/temp/" + safeName;
++
++        // Write the file into Emscripten's virtual filesystem. Qt's loader does
++        // not expose HEAPU8, so we cannot copy the bytes into wasm memory directly.
++        try {
++            M.FS.mkdirTree("/mu/temp");
++        } catch (e) { /* already exists */ }
++        M.FS.writeFile(path, data);
++
++        M.ccall("loadFromPath", null, ["string"], [path]);
++    },
++
++    saveScoreAs: function(fileName) {
++        this.Module.ccall("saveScoreAs", null, ["string"], [fileName || ""]);
+     },
+ 
+     startAudioProcessing: async function() {
+diff --git a/src/web/appjs/install.js b/src/web/appjs/install.js
+index 79926a6a..89d34c36 100644
+--- a/src/web/appjs/install.js
++++ b/src/web/appjs/install.js
+@@ -7,7 +7,7 @@ console.log("args:", args)
+ console.log("__dirname:", __dirname);
+ 
+ const HERE=__dirname
+-const ROOT=HERE+"/../.."
++const ROOT=HERE+"/../../.."
+ const OUTPUT_DIR = args.length > 0 ? args[0] : "./out"
+ const MUSE_MODULE_AUDIO_WORKER = "OFF"
+ 
+@@ -56,8 +56,8 @@ copyFile(HERE+"/viewer/index.html", OUTPUT_DIR+"/MuseScoreStudio.html");
+ copyFile(HERE+"/viewer/run_server.sh", OUTPUT_DIR+"/run_server.sh");
+ 
+ // Copy SF if need
+-const SF_SRC=ROOT+"/share/sound/MS Basic.sf3"
+-const SF_DST=OUTPUT_DIR+"/sound/MS Basic.sf3";
++const SF_SRC=ROOT+"/share/sound/FluidR3Mono_GM.sf3"
++const SF_DST=OUTPUT_DIR+"/sound/FluidR3Mono_GM.sf3";
+ if (!fs.existsSync(SF_DST)) {
+   fs.mkdirSync(OUTPUT_DIR+"/sound", { recursive: true });
+   copyFile(SF_SRC, SF_DST);
+diff --git a/src/web/appjs/viewer/viewer.html b/src/web/appjs/viewer/viewer.html
+index 23258b3a..a64b5033 100644
+--- a/src/web/appjs/viewer/viewer.html
++++ b/src/web/appjs/viewer/viewer.html
+@@ -76,6 +76,35 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
+           ui.style.display = 'block';
+       }
+ 
++      // Hand bytes coming from the native side to the browser as a download.
++      const downloadFile = (fileName, data, mimeType) => {
++          const blob = new Blob([data], { type: mimeType });
++          const url = URL.createObjectURL(blob);
++          const a = document.createElement("a");
++          a.href = url;
++          a.download = fileName;
++          document.body.appendChild(a);
++          a.click();
++          a.remove();
++          setTimeout(() => URL.revokeObjectURL(url), 10000);
++      }
++
++      const mimeTypeForFile = (fileName) => {
++          const suffix = fileName.split(".").pop().toLowerCase();
++          switch (suffix) {
++          case "musicxml":
++          case "xml":
++              return "application/vnd.recordare.musicxml+xml";
++          case "mxl":
++              return "application/vnd.recordare.musicxml";
++          case "mid":
++          case "midi":
++              return "audio/midi";
++          default:
++              return "application/octet-stream";
++          }
++      }
++
+       try {
+       
+         showUi(spinner);
+@@ -96,9 +125,57 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
+           },
+ 
+           // api callbacks
+-          onProjectSaved: function(data) {
+-            console.log("[html] onProjectSaved len: ", data.length)
+-          }   
++          onProjectSaved: function(name, data) {
++            console.log("[html] onProjectSaved: ", name, ", len: ", data.length)
++
++            // Trigger a browser download with the saved score bytes.
++            downloadFile(name || "score.mscz", data, "application/octet-stream");
++          },
++
++          onPrintReady: function(name, data) {
++            console.log("[html] onPrintReady: ", name, ", len: ", data.length)
++
++            // Render the PDF off-screen and let the browser's PDF viewer print it.
++            const blob = new Blob([data], { type: "application/pdf" });
++            const url = URL.createObjectURL(blob);
++            const frame = document.createElement("iframe");
++            frame.style.position = "fixed";
++            frame.style.right = "0";
++            frame.style.bottom = "0";
++            frame.style.width = "1px";
++            frame.style.height = "1px";
++            frame.style.opacity = "0";
++            frame.src = url;
++            frame.onload = function() {
++              try {
++                frame.contentWindow.focus();
++                frame.contentWindow.print();
++              } catch (e) {
++                console.error("print failed, opening the PDF instead", e);
++                window.open(url, "_blank");
++              }
++            };
++            document.body.appendChild(frame);
++            setTimeout(function() {
++              frame.remove();
++              URL.revokeObjectURL(url);
++            }, 120000);
++          },
++
++          onSaveAsRequested: function(suggestedName) {
++            // The browser has no native file dialog for picking a name, so ask here.
++            const fileName = window.prompt("Save score as", suggestedName || "score.mscz");
++            if (fileName) {
++              window.muapi.saveScoreAs(fileName);
++            }
++          },
++
++          onScoreExported: function(name, data) {
++            console.log("[html] onScoreExported: ", name, ", len: ", data.length)
++
++            // Trigger a browser download with the exported score bytes.
++            downloadFile(name || "score.musicxml", data, mimeTypeForFile(name || ""));
++          }
+         })
+ 
+         document.addEventListener('click', window.muapi.startAudioProcessing, { once: true });
+diff --git a/src/web/appjs/webapi.cpp b/src/web/appjs/webapi.cpp
+index c67de4c0..813a7480 100644
+--- a/src/web/appjs/webapi.cpp
++++ b/src/web/appjs/webapi.cpp
+@@ -27,6 +27,15 @@
+ #endif
+ 
+ #include "global/io/file.h"
++#include "global/io/dir.h"
++#include "global/io/path.h"
++
++#include "project/inotationproject.h"
++#include "notation/imasternotation.h"
++#include "notation/inotation.h"
++
++#include <cstdio>
++#include <vector>
+ 
+ #include "log.h"
+ 
+@@ -43,6 +52,20 @@ static void callJsWithBytes(const char* fnname, const uint8_t* data, size_t size
+     emscripten::val::module_property(fnname)(jsArray);
+ }
+ 
++static void callJsWithNameAndBytes(const char* fnname, const std::string& name, const uint8_t* data, size_t size)
++{
++    emscripten::val jsArray = emscripten::val::global("Uint8Array").new_(
++        emscripten::typed_memory_view(size, data)
++        );
++
++    emscripten::val::module_property(fnname)(emscripten::val(name), jsArray);
++}
++
++static void callJsWithString(const char* fnname, const std::string& value)
++{
++    emscripten::val::module_property(fnname)(emscripten::val(value));
++}
++
+ #else
+ 
+ static void callJsWithBytes(const char*, const uint8_t*, size_t)
+@@ -50,6 +73,16 @@ static void callJsWithBytes(const char*, const uint8_t*, size_t)
+     NOT_SUPPORTED;
+ }
+ 
++static void callJsWithNameAndBytes(const char*, const std::string&, const uint8_t*, size_t)
++{
++    NOT_SUPPORTED;
++}
++
++static void callJsWithString(const char*, const std::string&)
++{
++    NOT_SUPPORTED;
++}
++
+ #endif
+ 
+ WebApi* WebApi::instance()
+@@ -59,11 +92,18 @@ WebApi* WebApi::instance()
+     return &a;
+ }
+ 
+-void WebApi::init()
++WebApi::WebApi()
++    : muse::Contextable(muse::modularity::globalCtx())
++{
++}
++
++void WebApi::init(const muse::modularity::ContextPtr& ctx)
+ {
++    setContext(ctx);
++
+     auto onProjectChanged = [this]() {
+         if (m_currentProject) {
+-            m_currentProject->saveComplited().resetOnReceive(this);
++            m_currentProject->saveComplited().disconnect(this);
+         }
+ 
+         m_currentProject = projectSession()->project();
+@@ -83,7 +123,7 @@ void WebApi::init()
+ void WebApi::deinit()
+ {
+     if (m_currentProject) {
+-        m_currentProject->saveComplited().resetOnReceive(this);
++        m_currentProject->saveComplited().disconnect(this);
+     }
+ }
+ 
+@@ -102,11 +142,209 @@ void WebApi::load(const void* source, unsigned int len)
+     dispatcher()->dispatch("file-open", actions::ActionData::make_arg1(QUrl::fromLocalFile(tempFilePath.toQString())));
+ }
+ 
++void WebApi::loadFromPath(const std::string& path)
++{
++    LOGI() << "loadFromPath: " << path;
++
++    // The JS side writes the uploaded file into Emscripten's memory filesystem.
++    // Read it with plain libc (MuseScore's own io layer uses a different view of
++    // the filesystem), then hand the bytes to the normal project-opening flow.
++    FILE* f = ::fopen(path.c_str(), "rb");
++    if (!f) {
++        LOGE() << "failed to open file: " << path;
++        return;
++    }
++
++    ::fseek(f, 0, SEEK_END);
++    const long size = ::ftell(f);
++    ::fseek(f, 0, SEEK_SET);
++
++    if (size <= 0) {
++        ::fclose(f);
++        LOGE() << "empty file: " << path;
++        return;
++    }
++
++    std::vector<char> buf(static_cast<size_t>(size));
++    const size_t read = ::fread(buf.data(), 1, buf.size(), f);
++    ::fclose(f);
++
++    IF_ASSERT_FAILED(read == buf.size()) {
++        LOGE() << "failed to read file: " << path;
++        return;
++    }
++
++    //! NOTE Qt's (MuseScore's) filesystem view is not the same as the libc one used above,
++    //! so the bytes must be written again through the io layer. Keep the original file
++    //! name: the project path drives the title shown in the UI and the names used by
++    //! save / save-as / export.
++    const io::path_t dst = io::path_t(path);
++    io::File::remove(dst);
++    if (!io::File::writeFile(dst, ByteArray(buf.data(), buf.size()))) {
++        LOGE() << "failed to write temporary project file";
++        return;
++    }
++
++    if (!openProjectScenario()) {
++        LOGE() << "open project scenario is not available";
++        return;
++    }
++
++    openProjectScenario()->openProject(dst).onResolve(this, [](const Ret& ret) {
++        if (!ret) {
++            LOGE() << "failed to open project: " << ret.toString();
++        }
++    });
++}
++
++void WebApi::saveScore()
++{
++    saveScoreTo(scoreBaseName() + ".mscz");
++}
++
++void WebApi::saveScoreAs(const std::string& fileName)
++{
++    if (fileName.empty()) {
++        LOGE() << "saveScoreAs: empty file name";
++        return;
++    }
++
++    io::path_t name = io::escapeFileName(fileName);
++    if (io::suffix(name) != "mscz") {
++        name = name + ".mscz";
++    }
++
++    saveScoreTo(name);
++}
++
++void WebApi::requestSaveAs()
++{
++    const io::path_t suggestedName = scoreBaseName() + ".mscz";
++    callJsWithString("onSaveAsRequested", suggestedName.toStdString());
++}
++
++void WebApi::saveScoreTo(const io::path_t& fileName)
++{
++    const project::INotationProjectPtr project = projectSession() ? projectSession()->project() : nullptr;
++    if (!project) {
++        LOGE() << "saveScore: no project";
++        return;
++    }
++
++    //! NOTE Writing the copy is enough: `saveComplited` is already observed in init()
++    //! and that handler pushes the bytes to JS (single download).
++    const io::path_t path = "/mu/temp/" + fileName;
++    const Ret ret = project->save(path, project::SaveMode::SaveCopy, false);
++    if (!ret) {
++        LOGE() << "saveScore: failed to save: " << ret.toString();
++    }
++}
++
++io::path_t WebApi::scoreBaseName()
++{
++    const project::INotationProjectPtr project = projectSession() ? projectSession()->project() : nullptr;
++    if (!project) {
++        return "score";
++    }
++
++    //! NOTE Prefer the score title over the (temporary) project file name.
++    QString title;
++    if (const notation::IMasterNotationPtr masterNotation = project->masterNotation()) {
++        title = masterNotation->notation()->workTitle();
++    }
++
++    // The title falls back to the score name, which may still be a project file name.
++    const std::string titleSuffix = io::suffix(io::path_t(title));
++    if (titleSuffix == "mscz" || titleSuffix == "mscx") {
++        title = io::completeBasename(io::path_t(title)).toQString();
++    }
++
++    if (title.isEmpty()) {
++        title = "score";
++    }
++
++    return io::escapeFileName(title);
++}
++
++void WebApi::exportScore(const std::string& format)
++{
++    std::string suffix;
++    if (format == "musicxml") {
++        suffix = "musicxml";
++    } else if (format == "midi") {
++        suffix = "mid";
++    } else {
++        LOGE() << "exportScore: unsupported format: " << format;
++        return;
++    }
++
++    exportTo(suffix, "onScoreExported");
++}
++
++void WebApi::printScore()
++{
++    exportTo("pdf", "onPrintReady");
++}
++
++void WebApi::exportTo(const std::string& suffix, const char* jsCallback)
++{
++    const project::INotationProjectPtr project = projectSession() ? projectSession()->project() : nullptr;
++    if (!project) {
++        LOGE() << "exportTo: no project";
++        return;
++    }
++
++    const notation::IMasterNotationPtr masterNotation = project->masterNotation();
++    if (!masterNotation || !masterNotation->notation()) {
++        LOGE() << "exportTo: no notation";
++        return;
++    }
++
++    if (!exportProjectScenario()) {
++        LOGE() << "exportTo: export scenario is not available";
++        return;
++    }
++
++    //! NOTE The export writer streams into the Emscripten virtual filesystem, then
++    //! the bytes are handed to JS the same way the "save" flow does.
++    const io::path_t tempDir = "/mu/temp";
++    io::Dir::mkpath(tempDir);
++
++    const io::path_t fileName = scoreBaseName() + "." + suffix.c_str();
++    const io::path_t path = tempDir + "/" + fileName;
++    io::File::remove(path);
++
++    const notation::INotationPtrList notations { masterNotation->notation() };
++    const bool exported = exportProjectScenario()->exportScores(
++        notations, path, project::INotationWriter::UnitType::PER_PART, false);
++    if (!exported) {
++        LOGE() << "exportTo: failed to export to: " << path;
++        return;
++    }
++
++    ByteArray data;
++    const Ret ret = io::File::readFile(path, data);
++    if (!ret) {
++        LOGE() << "exportTo: failed to read exported file: " << path;
++        return;
++    }
++
++    callJsWithNameAndBytes(jsCallback, io::filename(path).toStdString(), data.constData(), data.size());
++}
++
+ void WebApi::addSoundFont(const std::string& uri)
+ {
+     soundFontController()->addSoundFont(Uri(uri));
+ }
+ 
++void WebApi::dispatchCommand(const std::string& command)
++{
++    LOGI() << "dispatchCommand: " << command;
++    if (commandDispatcher()) {
++        commandDispatcher()->dispatch(muse::rcommand::Command(command));
++    }
++}
++
+ void WebApi::startAudioProcessing()
+ {
+     startAudioController()->startAudioProcessing(IApplication::RunMode::GuiApp);
+@@ -126,5 +364,5 @@ void WebApi::onProjectSaved(const muse::io::path_t& path, mu::project::SaveMode)
+         return;
+     }
+ 
+-    callJsWithBytes("onProjectSaved", data.constData(), data.size());
++    callJsWithNameAndBytes("onProjectSaved", io::filename(path).toStdString(), data.constData(), data.size());
+ }
+diff --git a/src/web/appjs/webapi.h b/src/web/appjs/webapi.h
+index 3858e7e8..ea5950e7 100644
+--- a/src/web/appjs/webapi.h
++++ b/src/web/appjs/webapi.h
+@@ -27,35 +27,63 @@
+ #include "interactive/iinteractive.h"
+ #include "actions/iactionsdispatcher.h"
+ #include "project/iprojectsession.h"
++#include "project/iopenprojectscenario.h"
++#include "project/iexportprojectscenario.h"
++#include "rcommand/icommanddispatcher.h"
++#include "project/types/projecttypes.h"
+ #include "audio/main/istartaudiocontroller.h"
+ #include "audio/main/isoundfontcontroller.h"
+ 
+ namespace mu::appjs {
+-class WebApi : public muse::async::Asyncable
++class WebApi : public muse::async::Asyncable, public muse::Contextable
+ {
+-    inline static muse::GlobalInject<muse::IInteractive> interactive;
+-    inline static muse::GlobalInject<muse::actions::IActionsDispatcher> dispatcher;
+-    inline static muse::GlobalInject<mu::project::IProjectSession> projectSession;
+-    inline static muse::GlobalInject<muse::audio::IStartAudioController> startAudioController;
+-    inline static muse::GlobalInject<muse::audio::ISoundFontController> soundFontController;
++    muse::ContextInject<muse::actions::IActionsDispatcher> dispatcher = { this };
++    muse::ContextInject<mu::project::IProjectSession> projectSession = { this };
++    muse::ContextInject<mu::project::IOpenProjectScenario> openProjectScenario = { this };
++    muse::ContextInject<mu::project::IExportProjectScenario> exportProjectScenario = { this };
++    muse::ContextInject<muse::rcommand::ICommandDispatcher> commandDispatcher = { this };
++    muse::GlobalInject<muse::audio::IStartAudioController> startAudioController;
++    muse::GlobalInject<muse::audio::ISoundFontController> soundFontController;
+ 
+ public:
+ 
+     static WebApi* instance();
+ 
+-    void init();
++    void init(const muse::modularity::ContextPtr& ctx);
+     void deinit();
+ 
+     void load(const void* source, unsigned int len);
++    //! Opens a score that already exists in the Emscripten virtual filesystem
++    //! (the JS side writes the bytes with FS.writeFile).
++    void loadFromPath(const std::string& path);
++    //! Writes a copy of the current score, named after the score, and hands the bytes to JS
++    //! (browser download).
++    void saveScore();
++    //! Same as saveScore(), but with a file name chosen by the user.
++    void saveScoreAs(const std::string& fileName);
++    //! Asks JS to prompt for a file name (the answer arrives via saveScoreAs()).
++    void requestSaveAs();
++    //! Exports the current score to a non-native format ("musicxml" or "midi")
++    //! and hands the bytes to JS (browser download).
++    void exportScore(const std::string& format);
++    //! Renders the current score to PDF and hands the bytes to JS (browser print).
++    void printScore();
+     void addSoundFont(const std::string& uri);
+     void startAudioProcessing();
++    //! Test/debug hook: dispatch a command by name (used to verify playback headlessly).
++    void dispatchCommand(const std::string& command);
+ 
+ private:
+ 
+-    WebApi() = default;
++    WebApi();
+ 
+     void onProjectSaved(const muse::io::path_t& path, mu::project::SaveMode mode);
+ 
++    //! Base file name for downloads: the score title, or the project name as a fallback.
++    muse::io::path_t scoreBaseName();
++    void saveScoreTo(const muse::io::path_t& fileName);
++    void exportTo(const std::string& suffix, const char* jsCallback);
++
+     project::INotationProjectPtr m_currentProject;
+ };
+ }
+diff --git a/src/web/appshell/CMakeLists.txt b/src/web/appshell/CMakeLists.txt
+index 94d35b84..1e241152 100644
+--- a/src/web/appshell/CMakeLists.txt
++++ b/src/web/appshell/CMakeLists.txt
+@@ -32,6 +32,9 @@ set(MODULE_SRC
+     ${CMAKE_CURRENT_LIST_DIR}/internal/applicationuiactions.h
+     ${CMAKE_CURRENT_LIST_DIR}/internal/appshellconfiguration.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/internal/appshellconfiguration.h
++    ${CMAKE_CURRENT_LIST_DIR}/internal/appshellstate.cpp
++    ${CMAKE_CURRENT_LIST_DIR}/internal/appshellstate.h
++    ${CMAKE_CURRENT_LIST_DIR}/iappshellstate.h
+     ${CMAKE_CURRENT_LIST_DIR}/internal/applicationactioncontroller.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/internal/applicationactioncontroller.h
+     ${CMAKE_CURRENT_LIST_DIR}/internal/istartupscenario.h
+@@ -54,6 +57,22 @@ set(MODULE_LINK
+     )
+ 
+ # we use QKeyMapper to fix https://github.com/musescore/MuseScore/issues/10181
+-set(MODULE_INCLUDE_PRIVATE ${Qt6Gui_PRIVATE_INCLUDE_DIRS} )
++if(Qt6Gui_PRIVATE_INCLUDE_DIRS)
++    set(MODULE_INCLUDE_PRIVATE ${Qt6Gui_PRIVATE_INCLUDE_DIRS} )
++else()
++    # Qt WASM doesn't always export Qt6Gui_PRIVATE_INCLUDE_DIRS; derive the private
++    # include paths for both QtGui and QtCore (private headers chain across modules).
++    get_filename_component(_qt_prefix "${Qt6Gui_DIR}/../../.." ABSOLUTE)
++    set(_qt_private_includes)
++    foreach(_mod QtGui QtCore)
++        file(GLOB _priv_dirs "${_qt_prefix}/include/${_mod}/*/${_mod}/private")
++        foreach(_d ${_priv_dirs})
++            get_filename_component(_qt_dir "${_d}/.." ABSOLUTE)
++            get_filename_component(_ver_dir "${_d}/../.." ABSOLUTE)
++            list(APPEND _qt_private_includes "${_qt_dir}" "${_ver_dir}")
++        endforeach()
++    endforeach()
++    set(MODULE_INCLUDE_PRIVATE ${_qt_private_includes})
++endif()
+ 
+ setup_module()
+diff --git a/src/web/appshell/appshell.qrc b/src/web/appshell/appshell.qrc
+index e9dd544b..c70e65d1 100644
+--- a/src/web/appshell/appshell.qrc
++++ b/src/web/appshell/appshell.qrc
+@@ -5,6 +5,5 @@
+         <file>qml/AppButtonBackground.qml</file>
+         <file>qml/AppMenuBar.qml</file>
+         <file>qml/NotationFrame.qml</file>
+-        <file>qml/DevFrame.qml</file>
+     </qresource>
+ </RCC>
+diff --git a/src/web/appshell/appshellmodule.cpp b/src/web/appshell/appshellmodule.cpp
+index 91d3aa26..ebfaebf0 100644
+--- a/src/web/appshell/appshellmodule.cpp
++++ b/src/web/appshell/appshellmodule.cpp
+@@ -29,6 +29,8 @@
+ #include "ui/iuiactionsregister.h"
+ #include "interactive/iinteractiveuriregister.h"
+ 
++#include "internal/appshellstate.h"
++
+ #include "internal/applicationuiactions.h"
+ #include "internal/applicationactioncontroller.h"
+ #include "internal/appshellconfiguration.h"
+@@ -44,6 +46,8 @@ using namespace muse;
+ using namespace muse::modularity;
+ using namespace muse::dock;
+ 
++static const std::string mname("appshell");
++
+ static void appshell_init_qrc()
+ {
+     Q_INIT_RESOURCE(appshell);
+@@ -56,21 +60,18 @@ std::string AppShellModule::moduleName() const
+ 
+ void AppShellModule::registerExports()
+ {
+-    m_applicationActionController = std::make_shared<ApplicationActionController>(globalCtx());
+-    m_applicationUiActions = std::make_shared<ApplicationUiActions>(m_applicationActionController, globalCtx());
+     m_appShellConfiguration = std::make_shared<AppShellConfiguration>(globalCtx());
+ 
+     globalIoc()->registerExport<IAppShellConfiguration>(moduleName(), m_appShellConfiguration);
+-    globalIoc()->registerExport<IStartupScenario>(moduleName(), new StartupScenario(globalCtx()));
+ }
+ 
+-void AppShellModule::resolveImports()
++modularity::IContextSetup* AppShellModule::newContext(const muse::modularity::ContextPtr& ctx) const
+ {
+-    auto ar = globalIoc()->resolve<ui::IUiActionsRegister>(moduleName());
+-    if (ar) {
+-        ar->reg(m_applicationUiActions);
+-    }
++    return new AppShellContext(ctx);
++}
+ 
++void AppShellModule::resolveImports()
++{
+     auto ir = globalIoc()->resolve<interactive::IInteractiveUriRegister>(moduleName());
+     if (ir) {
+         ir->registerPageUri(Uri("musescore://notation"));
+@@ -78,6 +79,43 @@ void AppShellModule::resolveImports()
+     }
+ }
+ 
++void AppShellContext::registerExports()
++{
++    m_appShellState = std::make_shared<AppShellState>(iocContext());
++    m_applicationActionController = std::make_shared<ApplicationActionController>(iocContext());
++    m_applicationUiActions = std::make_shared<ApplicationUiActions>(m_applicationActionController, iocContext());
++
++    ioc()->registerExport<IAppShellState>(mname, m_appShellState);
++    ioc()->registerExport<IStartupScenario>(mname, new StartupScenario(iocContext()));
++}
++
++void AppShellContext::resolveImports()
++{
++    auto ar = ioc()->resolve<ui::IUiActionsRegister>(mname);
++    if (ar) {
++        ar->reg(m_applicationUiActions);
++    }
++}
++
++void AppShellContext::onPreInit(const IApplication::RunMode& mode)
++{
++    if (mode == IApplication::RunMode::AudioPluginRegistration) {
++        return;
++    }
++
++    m_applicationActionController->preInit();
++}
++
++void AppShellContext::onInit(const IApplication::RunMode& mode)
++{
++    if (mode == IApplication::RunMode::AudioPluginRegistration) {
++        return;
++    }
++
++    m_applicationActionController->init();
++    m_applicationUiActions->init();
++}
++
+ void AppShellModule::registerResources()
+ {
+     appshell_init_qrc();
+@@ -95,8 +133,7 @@ void AppShellModule::onPreInit(const IApplication::RunMode& mode)
+     if (mode == IApplication::RunMode::AudioPluginRegistration) {
+         return;
+     }
+-
+-    m_applicationActionController->preInit();
++    // Controller/ui-actions preInit is handled per-context in AppShellContext.
+ }
+ 
+ void AppShellModule::onInit(const IApplication::RunMode& mode)
+@@ -106,8 +143,6 @@ void AppShellModule::onInit(const IApplication::RunMode& mode)
+     }
+ 
+     m_appShellConfiguration->init();
+-    m_applicationActionController->init();
+-    m_applicationUiActions->init();
+ }
+ 
+ void AppShellModule::onAllInited(const IApplication::RunMode& mode)
+diff --git a/src/web/appshell/appshellmodule.h b/src/web/appshell/appshellmodule.h
+index bf81f7e9..91fb5db5 100644
+--- a/src/web/appshell/appshellmodule.h
++++ b/src/web/appshell/appshellmodule.h
+@@ -31,6 +31,7 @@ namespace mu::appshell {
+ class ApplicationActionController;
+ class ApplicationUiActions;
+ class AppShellConfiguration;
++class AppShellState;
+ class AppShellModule : public muse::modularity::IModuleSetup
+ {
+ public:
+@@ -48,10 +49,30 @@ public:
+     void onAllInited(const muse::IApplication::RunMode& mode) override;
+     void onDeinit() override;
+ 
++    muse::modularity::IContextSetup* newContext(const muse::modularity::ContextPtr& ctx) const override;
++
++private:
++    std::shared_ptr<AppShellConfiguration> m_appShellConfiguration;
++};
++
++// Per-context exports. IStartupScenario, IUiActionsRegister and the app shell
++// controller/ui-actions are contextual, so they must be created with a real
++// context (globalCtx() has id 0 and cannot resolve contextual interfaces).
++class AppShellContext : public muse::modularity::IContextSetup
++{
++public:
++    AppShellContext(const muse::modularity::ContextPtr& ctx)
++        : muse::modularity::IContextSetup(ctx) {}
++
++    void registerExports() override;
++    void resolveImports() override;
++    void onPreInit(const muse::IApplication::RunMode& mode) override;
++    void onInit(const muse::IApplication::RunMode& mode) override;
++
+ private:
++    std::shared_ptr<AppShellState> m_appShellState;
+     std::shared_ptr<ApplicationActionController> m_applicationActionController;
+     std::shared_ptr<ApplicationUiActions> m_applicationUiActions;
+-    std::shared_ptr<AppShellConfiguration> m_appShellConfiguration;
+ };
+ }
+ 
+diff --git a/src/web/appshell/iappshellconfiguration.h b/src/web/appshell/iappshellconfiguration.h
+index fed01d37..2e8dc75f 100644
+--- a/src/web/appshell/iappshellconfiguration.h
++++ b/src/web/appshell/iappshellconfiguration.h
+@@ -35,10 +35,6 @@ public:
+ 
+     virtual std::string museScoreVersion() const = 0;
+     virtual std::string museScoreRevision() const = 0;
+-
+-    virtual bool isNotationNavigatorVisible() const = 0;
+-    virtual void setIsNotationNavigatorVisible(bool visible) const = 0;
+-    virtual muse::async::Notification isNotationNavigatorVisibleChanged() const = 0;
+ };
+ }
+ 
+diff --git a/src/web/appshell/iappshellstate.h b/src/web/appshell/iappshellstate.h
+new file mode 100644
+index 00000000..665e19de
+--- /dev/null
++++ b/src/web/appshell/iappshellstate.h
+@@ -0,0 +1,39 @@
++/*
++ * SPDX-License-Identifier: GPL-3.0-only
++ * MuseScore-Studio-CLA-applies
++ *
++ * MuseScore Studio
++ * Music Composition & Notation
++ *
++ * Copyright (C) 2021 MuseScore Limited and others
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 3 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++#pragma once
++
++#include "modularity/imoduleinterface.h"
++#include "global/async/notification.h"
++
++namespace mu::appshell {
++class IAppShellState : MODULE_CONTEXT_INTERFACE
++{
++    INTERFACE_ID(IAppShellState)
++
++public:
++    virtual ~IAppShellState() = default;
++
++    virtual bool isNotationNavigatorVisible() const = 0;
++    virtual void setIsNotationNavigatorVisible(bool visible) = 0;
++    virtual muse::async::Notification isNotationNavigatorVisibleChanged() const = 0;
++};
++}
+diff --git a/src/web/appshell/internal/applicationuiactions.cpp b/src/web/appshell/internal/applicationuiactions.cpp
+index a62c305b..8697e4b7 100644
+--- a/src/web/appshell/internal/applicationuiactions.cpp
++++ b/src/web/appshell/internal/applicationuiactions.cpp
+@@ -22,8 +22,8 @@
+ #include "applicationuiactions.h"
+ 
+ #include "ui/view/iconcodes.h"
+-#include "context/uicontext.h"
+-#include "context/shortcutcontext.h"
++#include "ui/uiaction.h"
++#include "shortcuts/shortcutcontext.h"
+ 
+ #include "dockwindow/idockwindow.h"
+ #include "async/notification.h"
+@@ -43,15 +43,15 @@ static const ActionCode TOGGLE_PERCUSSION_PANEL_ACTION_CODE("toggle-percussion-p
+ const UiActionList ApplicationUiActions::m_actions = {
+     // Toolbars
+     UiAction("toggle-transport",
+-             mu::context::UiCtxProjectOpened,
+-             mu::context::CTX_NOTATION_OPENED,
++             muse::ui::UiCtxProjectOpened,
++             muse::shortcuts::CTX_PROJECT_OPENED,
+              TranslatableString("action", "&Playback controls"),
+              TranslatableString("action", "Show/hide playback controls"),
+              Checkable::Yes
+              ),
+     UiAction("toggle-noteinput",
+-             mu::context::UiCtxProjectOpened,
+-             mu::context::CTX_ANY,
++             muse::ui::UiCtxProjectOpened,
++             muse::shortcuts::CTX_ANY,
+              TranslatableString("action", "&Note input"),
+              TranslatableString("action", "Show/hide note input toolbar"),
+              Checkable::Yes
+@@ -59,36 +59,36 @@ const UiActionList ApplicationUiActions::m_actions = {
+ 
+     // Vertical panels
+     UiAction("toggle-palettes",
+-             mu::context::UiCtxProjectOpened,
+-             mu::context::CTX_ANY,
++             muse::ui::UiCtxProjectOpened,
++             muse::shortcuts::CTX_ANY,
+              TranslatableString("action", "&Palettes"),
+              TranslatableString("action", "Show/hide palettes"),
+              Checkable::Yes
+              ),
+     UiAction("toggle-instruments",
+-             mu::context::UiCtxProjectOpened,
+-             mu::context::CTX_ANY,
++             muse::ui::UiCtxProjectOpened,
++             muse::shortcuts::CTX_ANY,
+              TranslatableString("action", "&Layout"),
+              TranslatableString("action", "Show/hide layout panel"),
+              Checkable::Yes
+              ),
+     UiAction("toggle-properties-panel",
+-             mu::context::UiCtxProjectOpened,
+-             mu::context::CTX_ANY,
++             muse::ui::UiCtxProjectOpened,
++             muse::shortcuts::CTX_ANY,
+              TranslatableString("action", "Propert&ies"),
+              TranslatableString("action", "Show/hide properties"),
+              Checkable::Yes
+              ),
+     UiAction("toggle-selection-filter",
+-             mu::context::UiCtxProjectOpened,
+-             mu::context::CTX_NOTATION_OPENED,
++             muse::ui::UiCtxProjectOpened,
++             muse::shortcuts::CTX_PROJECT_OPENED,
+              TranslatableString("action", "Se&lection filter"),
+              TranslatableString("action", "Show/hide selection filter"),
+              Checkable::Yes
+              ),
+     UiAction("toggle-undo-history-panel",
+-             mu::context::UiCtxProjectOpened,
+-             mu::context::CTX_NOTATION_OPENED,
++             muse::ui::UiCtxProjectOpened,
++             muse::shortcuts::CTX_PROJECT_OPENED,
+              TranslatableString("action", "&History"),
+              TranslatableString("action", "Show/hide undo history"),
+              Checkable::Yes
+@@ -96,8 +96,8 @@ const UiActionList ApplicationUiActions::m_actions = {
+ 
+     // Navigator
+     UiAction(TOGGLE_NAVIGATOR_ACTION_CODE,
+-             mu::context::UiCtxProjectOpened,
+-             mu::context::CTX_ANY,
++             muse::ui::UiCtxProjectOpened,
++             muse::shortcuts::CTX_ANY,
+              TranslatableString("action", "&Navigator"),
+              TranslatableString("action", "Show/hide navigator"),
+              Checkable::Yes
+@@ -105,8 +105,8 @@ const UiActionList ApplicationUiActions::m_actions = {
+ 
+     // Braille panel
+     UiAction(TOGGLE_BRAILLE_ACTION_CODE,
+-             mu::context::UiCtxProjectOpened,
+-             mu::context::CTX_ANY,
++             muse::ui::UiCtxProjectOpened,
++             muse::shortcuts::CTX_ANY,
+              TranslatableString("action", "&Braille"),
+              TranslatableString("action", "Show/hide braille panel"),
+              Checkable::Yes
+@@ -114,45 +114,45 @@ const UiActionList ApplicationUiActions::m_actions = {
+ 
+     // Horizontal panels
+     UiAction("toggle-timeline",
+-             mu::context::UiCtxProjectOpened,
+-             mu::context::CTX_ANY,
++             muse::ui::UiCtxProjectOpened,
++             muse::shortcuts::CTX_ANY,
+              TranslatableString("action", "Tim&eline"),
+              TranslatableString("action", "Show/hide timeline"),
+              Checkable::Yes
+              ),
+     UiAction("toggle-mixer",
+-             mu::context::UiCtxProjectOpened,
+-             mu::context::CTX_ANY,
++             muse::ui::UiCtxProjectOpened,
++             muse::shortcuts::CTX_ANY,
+              TranslatableString("action", "Mixer"),
+              TranslatableString("action", "Show/hide mixer"),
+              IconCode::Code::MIXER,
+              Checkable::Yes
+              ),
+     UiAction("toggle-piano-keyboard",
+-             mu::context::UiCtxProjectOpened,
+-             mu::context::CTX_ANY,
++             muse::ui::UiCtxProjectOpened,
++             muse::shortcuts::CTX_ANY,
+              TranslatableString("action", "Piano &keyboard"),
+              TranslatableString("action", "Show/hide piano keyboard"),
+              Checkable::Yes
+              ),
+     UiAction(TOGGLE_PERCUSSION_PANEL_ACTION_CODE,
+-             mu::context::UiCtxProjectOpened,
+-             mu::context::CTX_NOTATION_OPENED,
++             muse::ui::UiCtxProjectOpened,
++             muse::shortcuts::CTX_PROJECT_OPENED,
+              TranslatableString("action", "Percussion"),
+              TranslatableString("action", "Show/hide percussion panel"),
+              Checkable::Yes
+              ),
+     UiAction("toggle-scorecmp-tool",
+-             mu::context::UiCtxProjectOpened,
+-             mu::context::CTX_NOTATION_OPENED,
++             muse::ui::UiCtxProjectOpened,
++             muse::shortcuts::CTX_PROJECT_OPENED,
+              TranslatableString("action", "Score comparison tool"),
+              Checkable::Yes
+              ),
+ 
+     // Status bar
+     UiAction("toggle-statusbar",
+-             mu::context::UiCtxProjectOpened,
+-             mu::context::CTX_NOTATION_OPENED,
++             muse::ui::UiCtxProjectOpened,
++             muse::shortcuts::CTX_PROJECT_OPENED,
+              TranslatableString("action", "&Status bar"),
+              TranslatableString("action", "Show/hide status bar"),
+              Checkable::Yes
+@@ -166,17 +166,13 @@ ApplicationUiActions::ApplicationUiActions(std::shared_ptr<ApplicationActionCont
+ 
+ void ApplicationUiActions::init()
+ {
+-    configuration()->isNotationNavigatorVisibleChanged().onNotify(this, [this]() {
++    appShellState()->isNotationNavigatorVisibleChanged().onNotify(this, [this]() {
+         m_actionCheckedChanged.send({ TOGGLE_NAVIGATOR_ACTION_CODE });
+     });
+ 
+     brailleConfiguration()->braillePanelEnabledChanged().onNotify(this, [this]() {
+         m_actionCheckedChanged.send({ TOGGLE_BRAILLE_ACTION_CODE });
+     });
+-
+-    notationConfiguration()->useNewPercussionPanelChanged().onNotify(this, [this]() {
+-        m_actionEnabledChanged.send({ TOGGLE_PERCUSSION_PANEL_ACTION_CODE });
+-    });
+ }
+ 
+ void ApplicationUiActions::listenOpenedDocksChanged(IDockWindow* window)
+@@ -209,10 +205,6 @@ const muse::ui::UiActionList& ApplicationUiActions::actionsList() const
+ 
+ bool ApplicationUiActions::actionEnabled(const UiAction& act) const
+ {
+-    if (act.code == TOGGLE_PERCUSSION_PANEL_ACTION_CODE) {
+-        return notationConfiguration()->useNewPercussionPanel();
+-    }
+-
+     return m_controller->canReceiveAction(act.code);
+ }
+ 
+@@ -226,7 +218,7 @@ bool ApplicationUiActions::actionChecked(const UiAction& act) const
+     }
+ 
+     if (dockName == NOTATION_NAVIGATOR_PANEL_NAME) {
+-        return configuration()->isNotationNavigatorVisible();
++        return appShellState()->isNotationNavigatorVisible();
+     }
+ 
+     if (dockName == NOTATION_BRAILLE_PANEL_NAME) {
+diff --git a/src/web/appshell/internal/applicationuiactions.h b/src/web/appshell/internal/applicationuiactions.h
+index 60575d8a..8df47459 100644
+--- a/src/web/appshell/internal/applicationuiactions.h
++++ b/src/web/appshell/internal/applicationuiactions.h
+@@ -32,6 +32,7 @@
+ #include "notation/inotationconfiguration.h"
+ #include "dockwindow/idockwindowprovider.h"
+ #include "../iappshellconfiguration.h"
++#include "../iappshellstate.h"
+ 
+ #include "../appshelltypes.h"
+ #include "applicationactioncontroller.h"
+@@ -39,7 +40,7 @@
+ namespace mu::appshell {
+ class ApplicationUiActions : public muse::ui::IUiActionsModule, public muse::Contextable, public muse::async::Asyncable
+ {
+-    muse::GlobalInject<IAppShellConfiguration> configuration;
++    muse::ContextInject<IAppShellState> appShellState = { this };
+     muse::GlobalInject<braille::IBrailleConfiguration> brailleConfiguration;
+     muse::GlobalInject<mu::notation::INotationConfiguration> notationConfiguration;
+     muse::ContextInject<muse::ui::IMainWindow> mainWindow = { this };
+diff --git a/src/web/appshell/internal/appshellconfiguration.cpp b/src/web/appshell/internal/appshellconfiguration.cpp
+index f6a33e27..16d51c72 100644
+--- a/src/web/appshell/internal/appshellconfiguration.cpp
++++ b/src/web/appshell/internal/appshellconfiguration.cpp
+@@ -26,8 +26,6 @@ using namespace mu::appshell;
+ 
+ static const std::string module_name("appshell");
+ 
+-static const QString NOTATION_NAVIGATOR_VISIBLE_KEY("showNavigator");
+-
+ void AppShellConfiguration::init()
+ {
+ }
+@@ -41,18 +39,3 @@ std::string AppShellConfiguration::museScoreRevision() const
+ {
+     return application()->revision().toStdString();
+ }
+-
+-bool AppShellConfiguration::isNotationNavigatorVisible() const
+-{
+-    return uiConfiguration()->isVisible(NOTATION_NAVIGATOR_VISIBLE_KEY, false);
+-}
+-
+-void AppShellConfiguration::setIsNotationNavigatorVisible(bool visible) const
+-{
+-    uiConfiguration()->setIsVisible(NOTATION_NAVIGATOR_VISIBLE_KEY, visible);
+-}
+-
+-muse::async::Notification AppShellConfiguration::isNotationNavigatorVisibleChanged() const
+-{
+-    return uiConfiguration()->isVisibleChanged(NOTATION_NAVIGATOR_VISIBLE_KEY);
+-}
+diff --git a/src/web/appshell/internal/appshellconfiguration.h b/src/web/appshell/internal/appshellconfiguration.h
+index 7555abad..e433bd1e 100644
+--- a/src/web/appshell/internal/appshellconfiguration.h
++++ b/src/web/appshell/internal/appshellconfiguration.h
+@@ -34,7 +34,7 @@ namespace mu::appshell {
+ class AppShellConfiguration : public IAppShellConfiguration, public muse::Contextable, public muse::async::Asyncable
+ {
+     muse::GlobalInject<muse::ui::IUiConfiguration> uiConfiguration;
+-    muse::ContextInject<muse::IApplication> application = { this };
++    muse::GlobalInject<muse::IApplication> application;
+ 
+ public:
+     AppShellConfiguration(const muse::modularity::ContextPtr& iocCtx)
+@@ -45,10 +45,6 @@ public:
+     std::string museScoreVersion() const override;
+     std::string museScoreRevision() const override;
+ 
+-    bool isNotationNavigatorVisible() const override;
+-    void setIsNotationNavigatorVisible(bool visible) const override;
+-    muse::async::Notification isNotationNavigatorVisibleChanged() const override;
+-
+ private:
+ };
+ }
+diff --git a/src/web/appshell/internal/appshellstate.cpp b/src/web/appshell/internal/appshellstate.cpp
+new file mode 100644
+index 00000000..394d39eb
+--- /dev/null
++++ b/src/web/appshell/internal/appshellstate.cpp
+@@ -0,0 +1,41 @@
++/*
++ * SPDX-License-Identifier: GPL-3.0-only
++ * MuseScore-Studio-CLA-applies
++ *
++ * MuseScore Studio
++ * Music Composition & Notation
++ *
++ * Copyright (C) 2021 MuseScore Limited and others
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 3 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++#include "appshellstate.h"
++
++using namespace mu::appshell;
++
++static const QString NOTATION_NAVIGATOR_VISIBLE_KEY("showNavigator");
++
++bool AppShellState::isNotationNavigatorVisible() const
++{
++    return uistate()->isVisible(NOTATION_NAVIGATOR_VISIBLE_KEY, false);
++}
++
++void AppShellState::setIsNotationNavigatorVisible(bool visible)
++{
++    uistate()->setIsVisible(NOTATION_NAVIGATOR_VISIBLE_KEY, visible);
++}
++
++muse::async::Notification AppShellState::isNotationNavigatorVisibleChanged() const
++{
++    return uistate()->isVisibleChanged(NOTATION_NAVIGATOR_VISIBLE_KEY);
++}
+diff --git a/src/web/appshell/internal/appshellstate.h b/src/web/appshell/internal/appshellstate.h
+new file mode 100644
+index 00000000..928ec6d4
+--- /dev/null
++++ b/src/web/appshell/internal/appshellstate.h
+@@ -0,0 +1,42 @@
++/*
++ * SPDX-License-Identifier: GPL-3.0-only
++ * MuseScore-Studio-CLA-applies
++ *
++ * MuseScore Studio
++ * Music Composition & Notation
++ *
++ * Copyright (C) 2021 MuseScore Limited and others
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 3 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++#pragma once
++
++#include "../iappshellstate.h"
++
++#include "modularity/ioc.h"
++#include "ui/iuistate.h"
++
++namespace mu::appshell {
++class AppShellState : public IAppShellState, public muse::Contextable
++{
++    muse::ContextInject<muse::ui::IUiState> uistate = { this };
++
++public:
++    AppShellState(const muse::modularity::ContextPtr& iocCtx)
++        : muse::Contextable(iocCtx) {}
++
++    bool isNotationNavigatorVisible() const override;
++    void setIsNotationNavigatorVisible(bool visible) override;
++    muse::async::Notification isNotationNavigatorVisibleChanged() const override;
++};
++}
+diff --git a/src/web/appshell/internal/istartupscenario.h b/src/web/appshell/internal/istartupscenario.h
+index a32f8158..50dd0207 100644
+--- a/src/web/appshell/internal/istartupscenario.h
++++ b/src/web/appshell/internal/istartupscenario.h
+@@ -43,7 +43,7 @@ public:
+     virtual const project::ProjectFile& startupScoreFile() const = 0;
+     virtual void setStartupScoreFile(const std::optional<project::ProjectFile>& file) = 0;
+ 
+-    virtual muse::async::Promise<muse::Ret> runOnSplashScreen() = 0;
++    virtual void runOnSplashScreen() = 0;
+     virtual void runAfterSplashScreen() = 0;
+     virtual bool startupCompleted() const = 0;
+ };
+diff --git a/src/web/appshell/internal/startupscenario.cpp b/src/web/appshell/internal/startupscenario.cpp
+index 7c7cf0eb..84ac189d 100644
+--- a/src/web/appshell/internal/startupscenario.cpp
++++ b/src/web/appshell/internal/startupscenario.cpp
+@@ -47,11 +47,8 @@ void StartupScenario::setStartupScoreFile(const std::optional<project::ProjectFi
+     NOT_IMPLEMENTED;
+ }
+ 
+-muse::async::Promise<Ret> StartupScenario::runOnSplashScreen()
++void StartupScenario::runOnSplashScreen()
+ {
+-    return async::make_promise<Ret>([](auto resolve) {
+-        return resolve(muse::make_ok());
+-    });
+ }
+ 
+ void StartupScenario::runAfterSplashScreen()
+diff --git a/src/web/appshell/internal/startupscenario.h b/src/web/appshell/internal/startupscenario.h
+index fd3e5e5f..cc17542f 100644
+--- a/src/web/appshell/internal/startupscenario.h
++++ b/src/web/appshell/internal/startupscenario.h
+@@ -42,7 +42,7 @@ public:
+     const project::ProjectFile& startupScoreFile() const override;
+     void setStartupScoreFile(const std::optional<project::ProjectFile>& file) override;
+ 
+-    muse::async::Promise<muse::Ret> runOnSplashScreen() override;
++    void runOnSplashScreen() override;
+     void runAfterSplashScreen() override;
+     bool startupCompleted() const override;
+ 
+diff --git a/src/web/appshell/qml/AppMenuBar.qml b/src/web/appshell/qml/AppMenuBar.qml
+index 28379d02..c9f47435 100644
+--- a/src/web/appshell/qml/AppMenuBar.qml
++++ b/src/web/appshell/qml/AppMenuBar.qml
+@@ -126,17 +126,12 @@ Item {
+                 contentItem: StyledTextLabel {
+                     id: textLabel
+ 
+-                    width: textMetrics.width
++                    width: implicitWidth
+ 
+                     text: appMenuModel.isNavigationStarted ? radioButtonDelegate.titleWithMnemonicUnderline : radioButtonDelegate.title
+                     textFormat: Text.RichText
+                     font: ui.theme.bodyFont
+ 
+-            text: appMenuModel.isNavigationStarted ? radioButtonDelegate.titleWithMnemonicUnderline : radioButtonDelegate.title
+-            textFormat: Text.RichText
+-            font: ui.theme.bodyFont
+-        }
+-
+                     color: radioButtonDelegate.normalColor
+                 }
+ 
+diff --git a/src/web/appshell/qml/DevFrame.qml b/src/web/appshell/qml/DevFrame.qml
+deleted file mode 100644
+index ddc2549c..00000000
+--- a/src/web/appshell/qml/DevFrame.qml
++++ /dev/null
+@@ -1,71 +0,0 @@
+-// import QtQuick
+-
+-// Item {
+-//     width: 200; height: 200
+-
+-//     Rectangle {
+-//         anchors.centerIn: parent
+-//         width: text.implicitWidth + 20; height: text.implicitHeight + 10
+-//         color: "green"
+-//         radius: 5
+-
+-//         Drag.dragType: Drag.Automatic
+-//         Drag.supportedActions: Qt.CopyAction
+-//         Drag.mimeData: {
+-//             "text/plain": "Copied text"
+-//         }
+-
+-//         Text {
+-//             id: text
+-//             anchors.centerIn: parent
+-//             text: "Drag me"
+-//         }
+-
+-//         DragHandler {
+-//             id: dragHandler
+-//             onActiveChanged:
+-//                 if (active) {
+-//                     parent.grabToImage(function(result) {
+-//                         parent.Drag.imageSource = result.url
+-//                         parent.Drag.active = true
+-//                     }, Qt.size(50, 50))
+-//                 } else {
+-//                     parent.Drag.active = false
+-//                 }
+-//         }
+-//     }
+-// }
+-
+-
+-import QtQuick
+-
+-Item {
+-    width: 200; height: 200
+-
+-    DropArea {
+-        x: 75; y: 75
+-        width: 50; height: 50
+-
+-        Rectangle {
+-            anchors.fill: parent
+-            color: parent.containsDrag ? "green" : "grey"
+-        }
+-    }
+-
+-    Rectangle {
+-        x: 10; y: 10
+-        width: 20; height: 20
+-        color: "red"
+-
+-        Drag.active: dragArea.drag.active
+-        Drag.hotSpot.x: 10
+-        Drag.hotSpot.y: 10
+-
+-        MouseArea {
+-            id: dragArea
+-            anchors.fill: parent
+-
+-            drag.target: parent
+-        }
+-    }
+-}
+diff --git a/src/web/appshell/qml/Main.qml b/src/web/appshell/qml/Main.qml
+index f760f15c..6f51548f 100644
+--- a/src/web/appshell/qml/Main.qml
++++ b/src/web/appshell/qml/Main.qml
+@@ -21,10 +21,10 @@
+  */
+ import QtQuick
+ import QtQuick.Controls
+-import QtQuick.Layouts
+ 
+ import Muse.Ui 1.0
+ import Muse.UiComponents
++import Muse.Interactive
+ 
+ import MuseScore.AppShell 1.0
+ import MuseScore.Playback 1.0
+@@ -34,6 +34,10 @@ AppWindow {
+ 
+     flags: Qt.FramelessWindowHint
+ 
++    NotationPageModel {
++        id: pageModel
++    }
++
+     InteractiveProvider {
+         id: interactiveProvider
+         topParent: root
+@@ -66,33 +70,110 @@ AppWindow {
+             StyledTabButton {
+                 text: "Notation"
+             }
+-            StyledTabButton {
+-                text: "Dev"
++        }
++
++        Row {
++            id: fileActions
++            anchors.left: bar.right
++            anchors.leftMargin: 12
++            spacing: 4
++
++            FlatButton {
++                id: printScoreButton
++                icon: IconCode.PRINT
++                toolTipTitle: "Print score"
++                accessible.name: "Print score"
++                onClicked: pageModel.printScore()
++            }
++
++            FlatButton {
++                id: newScoreButton
++                icon: IconCode.NEW_FILE
++                toolTipTitle: "New score"
++                accessible.name: "New score"
++                onClicked: pageModel.newScore()
++            }
++
++            FlatButton {
++                id: openScoreButton
++                icon: IconCode.OPEN_FILE
++                toolTipTitle: "Open score"
++                accessible.name: "Open score"
++                onClicked: pageModel.openScore()
++            }
++
++            FlatButton {
++                id: saveScoreButton
++                icon: IconCode.SAVE
++                toolTipTitle: "Save score"
++                accessible.name: "Save score"
++                onClicked: pageModel.saveScore()
++            }
++
++            FlatButton {
++                id: saveScoreAsButton
++                icon: IconCode.SMALL_ARROW_DOWN
++                toolTipTitle: "Save as…"
++                accessible.name: "Save score as"
++                onClicked: {
++                    saveAsMenu.toggleOpened([
++                        { id: "save-as", icon: IconCode.SAVE, title: "Save as…" }
++                    ])
++                }
++
++                StyledMenuLoader {
++                    id: saveAsMenu
++
++                    menuAnchorItem: root.contentItem
++
++                    onHandleMenuItem: function(itemId) {
++                        if (itemId === "save-as") {
++                            pageModel.saveScoreAs()
++                        }
++                    }
++                }
++            }
++
++            FlatButton {
++                id: exportScoreButton
++                icon: IconCode.SHARE_FILE
++                toolTipTitle: "Export score"
++                accessible.name: "Export score"
++                onClicked: {
++                    exportMenu.toggleOpened([
++                        { id: "musicxml", icon: IconCode.MUSIC_NOTES, title: "MusicXML (.musicxml)" },
++                        { id: "midi", icon: IconCode.MIDI_INPUT, title: "MIDI (.mid)" }
++                    ])
++                }
++
++                StyledMenuLoader {
++                    id: exportMenu
++
++                    menuAnchorItem: root.contentItem
++
++                    onHandleMenuItem: function(itemId) {
++                        if (itemId === "musicxml") {
++                            pageModel.exportMusicXml()
++                        } else if (itemId === "midi") {
++                            pageModel.exportMidi()
++                        }
++                    }
++                }
+             }
+         }
+ 
+         PlaybackToolBar {
+-            anchors.left: bar.right
++            anchors.left: fileActions.right
+             anchors.right: parent.right
+             anchors.leftMargin: 16
+         }
+ 
+-        StackLayout {
++        NotationFrame {
+             anchors.top: bar.bottom
+             anchors.topMargin: 8
+             anchors.bottom: parent.bottom
+             anchors.left: parent.left
+             anchors.right: parent.right
+-            currentIndex: bar.currentIndex
+-
+-            NotationFrame {
+-
+-            }
+-
+-            DevFrame {
+-
+-            }
+-
+         }
+     }
+ }
+diff --git a/src/web/appshell/view/appmenumodel.cpp b/src/web/appshell/view/appmenumodel.cpp
+index e679dc3d..9d99af53 100644
+--- a/src/web/appshell/view/appmenumodel.cpp
++++ b/src/web/appshell/view/appmenumodel.cpp
+@@ -31,6 +31,9 @@
+ 
+ #include "notationscene/notationcommands.h"
+ 
++#include "notation/inotation.h"
++#include "notation/inotationundostack.h"
++
+ #include "log.h"
+ 
+ using namespace muse;
+diff --git a/src/web/appshell/view/appmenumodel.h b/src/web/appshell/view/appmenumodel.h
+index e9e0f40c..a348c07f 100644
+--- a/src/web/appshell/view/appmenumodel.h
++++ b/src/web/appshell/view/appmenumodel.h
+@@ -27,7 +27,7 @@
+ 
+ #include "modularity/ioc.h"
+ #include "actions/iactionsdispatcher.h"
+-#include "context/iprojectsession.h"
++#include "project/iprojectsession.h"
+ #include "global/iglobalconfiguration.h"
+ #include "project/iprojectconfiguration.h"
+ #include "ui/imainwindow.h"
+@@ -47,7 +47,7 @@ public:
+     muse::GlobalInject<project::IProjectConfiguration> projectConfiguration;
+     muse::GlobalInject<IAppShellConfiguration> configuration;
+     muse::GlobalInject<muse::IGlobalConfiguration> globalConfiguration;
+-    muse::ContextInject<mu::context::IProjectSession> projectSession = { this };
++    muse::ContextInject<mu::project::IProjectSession> projectSession = { this };
+     muse::ContextInject<muse::actions::IActionsDispatcher> actionsDispatcher = { this };
+     muse::ContextInject<muse::ui::IMainWindow> mainWindow = { this };
+     muse::ContextInject<muse::ui::INavigationController> navigationController = { this };
+diff --git a/src/web/appshell/view/mainwindowtitleprovider.h b/src/web/appshell/view/mainwindowtitleprovider.h
+index 803e825d..dcf3e941 100644
+--- a/src/web/appshell/view/mainwindowtitleprovider.h
++++ b/src/web/appshell/view/mainwindowtitleprovider.h
+@@ -23,7 +23,7 @@
+ #define MU_APPSHELL_MAINWINDOWTITLEPROVIDER_H
+ 
+ #include "async/asyncable.h"
+-#include "context/iprojectsession.h"
++#include "project/iprojectsession.h"
+ 
+ namespace mu::appshell {
+ class MainWindowTitleProvider : public QObject, public muse::Contextable, public muse::async::Asyncable
+@@ -34,7 +34,7 @@ class MainWindowTitleProvider : public QObject, public muse::Contextable, public
+     Q_PROPERTY(QString filePath READ filePath NOTIFY filePathChanged)
+     Q_PROPERTY(bool fileModified READ fileModified NOTIFY fileModifiedChanged)
+ 
+-    muse::ContextInject<context::IProjectSession> context = { this };
++    muse::ContextInject<mu::project::IProjectSession> context = { this };
+ 
+ public:
+     explicit MainWindowTitleProvider(QObject* parent = nullptr);
+diff --git a/src/web/appshell/view/navigableappmenumodel.cpp b/src/web/appshell/view/navigableappmenumodel.cpp
+index 2138bc2f..64631b80 100644
+--- a/src/web/appshell/view/navigableappmenumodel.cpp
++++ b/src/web/appshell/view/navigableappmenumodel.cpp
+@@ -21,7 +21,7 @@
+  */
+ #include "navigableappmenumodel.h"
+ 
+-#include <QApplication>
++#include <QGuiApplication>
+ #include <QWindow>
+ #include <QKeyEvent>
+ 
+@@ -74,7 +74,7 @@ void NavigableAppMenuModel::load()
+ {
+     AppMenuModel::load();
+ 
+-    connect(qApp, &QApplication::applicationStateChanged, this, [this](Qt::ApplicationState state){
++    connect(qApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state){
+         if (state != Qt::ApplicationActive) {
+             resetNavigation();
+         }
+diff --git a/src/web/appshell/view/notationpagemodel.cpp b/src/web/appshell/view/notationpagemodel.cpp
+index 2f26b71b..75a88417 100644
+--- a/src/web/appshell/view/notationpagemodel.cpp
++++ b/src/web/appshell/view/notationpagemodel.cpp
+@@ -22,6 +22,8 @@
+ 
+ #include "notationpagemodel.h"
+ 
++#include "project/projectcommands.h"
++
+ #include "internal/applicationuiactions.h"
+ #include "dockwindow/idockwindow.h"
+ 
+@@ -29,11 +31,18 @@
+ 
+ #include "notation/inotationinteraction.h"
+ #include "notation/inotationnoteinput.h"
++#include "notation/inotation.h"
++#include "notation/inotationelements.h" // IWYU pragma: keep
++#include "notation/inotationselection.h"
++#include "engraving/dom/part.h"
++#include "engraving/dom/score.h"
++#include "engraving/dom/staff.h"
+ 
+ #include "log.h"
+ 
+ using namespace mu::appshell;
+ using namespace mu::notation;
++using namespace mu::engraving;
+ using namespace muse::actions;
+ 
+ NotationPageModel::NotationPageModel(QObject* parent)
+@@ -41,9 +50,62 @@ NotationPageModel::NotationPageModel(QObject* parent)
+ {
+ }
+ 
++void NotationPageModel::newScore()
++{
++    if (commandDispatcher()) {
++        commandDispatcher()->dispatch(project::PROJECT_NEW_COMMAND);
++    }
++}
++
++void NotationPageModel::openScore()
++{
++    if (commandDispatcher()) {
++        commandDispatcher()->dispatch(project::PROJECT_OPEN_COMMAND);
++    }
++}
++
++void NotationPageModel::saveScore()
++{
++    if (commandDispatcher()) {
++        //! NOTE Saving is implemented by the JS bridge (it hands the bytes to the browser),
++        //! not by the desktop save controller, which has no storage backend on the web.
++        commandDispatcher()->dispatch(muse::rcommand::Command("command://web/score-save"));
++    }
++}
++
++void NotationPageModel::saveScoreAs()
++{
++    if (commandDispatcher()) {
++        //! NOTE The file name is asked for in the browser; the native side only suggests one.
++        commandDispatcher()->dispatch(muse::rcommand::Command("command://web/score-save-as"));
++    }
++}
++
++void NotationPageModel::printScore()
++{
++    if (commandDispatcher()) {
++        //! NOTE The score is rendered to PDF natively; the browser opens its print dialog.
++        commandDispatcher()->dispatch(muse::rcommand::Command("command://web/print-score"));
++    }
++}
++
++void NotationPageModel::exportMusicXml()
++{
++    if (commandDispatcher()) {
++        commandDispatcher()->dispatch(muse::rcommand::Command("command://web/export-musicxml"));
++    }
++}
++
++void NotationPageModel::exportMidi()
++{
++    if (commandDispatcher()) {
++        commandDispatcher()->dispatch(muse::rcommand::Command("command://web/export-midi"));
++    }
++}
++
+ bool NotationPageModel::isNavigatorVisible() const
+ {
+-    return configuration()->isNotationNavigatorVisible();
++    return appShellState()->isNotationNavigatorVisible();
+ }
+ 
+ bool NotationPageModel::isBraillePanelVisible() const
+@@ -73,12 +135,7 @@ void NotationPageModel::init()
+     updateDrumsetPanelVisibility();
+     updatePercussionPanelVisibility();
+ 
+-    notationConfiguration()->useNewPercussionPanelChanged().onNotify(this, [this]() {
+-        updateDrumsetPanelVisibility();
+-        updatePercussionPanelVisibility();
+-    });
+-
+-    notationConfiguration()->percussionPanelAutoShowModeChanged().onNotify(this, [this]() {
++    notationSceneConfiguration()->percussionPanelAutoShowModeChanged().onNotify(this, [this]() {
+         updatePercussionPanelVisibility();
+     });
+ }
+@@ -181,7 +238,7 @@ void NotationPageModel::onNotationChanged()
+ void NotationPageModel::toggleDock(const QString& name)
+ {
+     if (name == NOTATION_NAVIGATOR_PANEL_NAME) {
+-        configuration()->setIsNotationNavigatorVisible(!isNavigatorVisible());
++        appShellState()->setIsNotationNavigatorVisible(!isNavigatorVisible());
+         emit isNavigatorVisibleChanged();
+         return;
+     }
+@@ -216,21 +273,8 @@ void NotationPageModel::updateDrumsetPanelVisibility()
+     };
+ 
+     // This should never be open when the new percussion panel is in use...
+-    if (notationConfiguration()->useNewPercussionPanel()) {
+-        setDrumsetPanelOpen(false);
+-        return;
+-    }
+-
+-    const INotationPtr notation = projectSession()->currentNotation();
+-    if (!notation) {
+-        setDrumsetPanelOpen(false);
+-        return;
+-    }
+-
+-    const INotationNoteInputPtr noteInput = notation->interaction()->noteInput();
+-    const bool shouldOpen = noteInput->isNoteInputMode() && noteInput->state().drumset() != nullptr;
+-
+-    setDrumsetPanelOpen(shouldOpen);
++    // (The old drumset panel was removed; new percussion panel is the only one now.)
++    setDrumsetPanelOpen(false);
+ }
+ 
+ void NotationPageModel::updatePercussionPanelVisibility()
+@@ -256,19 +300,16 @@ void NotationPageModel::updatePercussionPanelVisibility()
+     };
+ 
+     // This should never be open when the old drumset panel is in use...
+-    if (!notationConfiguration()->useNewPercussionPanel()) {
+-        setPercussionPanelOpen(false);
+-        return;
+-    }
++    // (The old drumset panel was removed; new percussion panel is the only one now.)
+ 
+-    const PercussionPanelAutoShowMode autoShowMode = notationConfiguration()->percussionPanelAutoShowMode();
++    const PercussionPanelAutoShowMode autoShowMode = notationSceneConfiguration()->percussionPanelAutoShowMode();
+     const INotationPtr notation = projectSession()->currentNotation();
+     if (!notation || !notation->elements() || autoShowMode == PercussionPanelAutoShowMode::NEVER) {
+         return;
+     }
+ 
+     const INotationNoteInputPtr noteInput = notation->interaction()->noteInput();
+-    const bool autoClose = notationConfiguration()->autoClosePercussionPanel();
++    const bool autoClose = notationSceneConfiguration()->autoClosePercussionPanel();
+     if (noteInput && !noteInput->isNoteInputMode() && autoShowMode == PercussionPanelAutoShowMode::UNPITCHED_STAFF_NOTE_INPUT) {
+         if (autoClose) {
+             setPercussionPanelOpen(false);
+diff --git a/src/web/appshell/view/notationpagemodel.h b/src/web/appshell/view/notationpagemodel.h
+index 220bdc72..e03337de 100644
+--- a/src/web/appshell/view/notationpagemodel.h
++++ b/src/web/appshell/view/notationpagemodel.h
+@@ -25,12 +25,15 @@
+ #include <QQuickItem>
+ 
+ #include "modularity/ioc.h"
++#include "rcommand/icommanddispatcher.h"
+ #include "async/asyncable.h"
+ #include "actions/actionable.h"
+ #include "actions/iactionsdispatcher.h"
+-#include "context/iprojectsession.h"
++#include "project/iprojectsession.h"
+ #include "iappshellconfiguration.h"
++#include "iappshellstate.h"
+ #include "notation/inotationconfiguration.h"
++#include "notationscene/inotationsceneconfiguration.h"
+ #include "braille/ibrailleconfiguration.h"
+ #include "dockwindow/idockwindowprovider.h"
+ 
+@@ -42,11 +45,13 @@ class NotationPageModel : public QObject, public muse::Contextable, public muse:
+     Q_PROPERTY(bool isNavigatorVisible READ isNavigatorVisible NOTIFY isNavigatorVisibleChanged)
+     Q_PROPERTY(bool isBraillePanelVisible READ isBraillePanelVisible NOTIFY isBraillePanelVisibleChanged)
+ 
+-    muse::GlobalInject<IAppShellConfiguration> configuration;
++    muse::ContextInject<IAppShellState> appShellState = { this };
+     muse::GlobalInject<notation::INotationConfiguration> notationConfiguration;
++    muse::GlobalInject<notation::INotationSceneConfiguration> notationSceneConfiguration;
+     muse::GlobalInject<braille::IBrailleConfiguration> brailleConfiguration;
+     muse::ContextInject<muse::actions::IActionsDispatcher> dispatcher = { this };
+-    muse::ContextInject<context::IProjectSession> projectSession = { this };
++    muse::ContextInject<muse::rcommand::ICommandDispatcher> commandDispatcher = { this };
++    muse::ContextInject<mu::project::IProjectSession> projectSession = { this };
+     muse::ContextInject<muse::dock::IDockWindowProvider> dockWindowProvider = { this };
+ 
+ public:
+@@ -57,6 +62,17 @@ public:
+ 
+     Q_INVOKABLE void init();
+ 
++    //! File actions for the web toolbar (new / open / save)
++    Q_INVOKABLE void newScore();
++    Q_INVOKABLE void openScore();
++    Q_INVOKABLE void saveScore();
++    Q_INVOKABLE void saveScoreAs();
++
++    //! Print / export actions for the web toolbar
++    Q_INVOKABLE void printScore();
++    Q_INVOKABLE void exportMusicXml();
++    Q_INVOKABLE void exportMidi();
++
+     Q_INVOKABLE QString notationToolBarName() const;
+     Q_INVOKABLE QString playbackToolBarName() const;
+     Q_INVOKABLE QString undoRedoToolBarName() const;
+diff --git a/src/web/appshell/view/notationstatusbarmodel.cpp b/src/web/appshell/view/notationstatusbarmodel.cpp
+index e6777282..6631790e 100644
+--- a/src/web/appshell/view/notationstatusbarmodel.cpp
++++ b/src/web/appshell/view/notationstatusbarmodel.cpp
+@@ -30,6 +30,14 @@
+ #include "workspace/view/workspacesmenumodel.h"
+ #endif
+ 
++#include "engraving/dom/score.h"
++#include "notation/inotation.h"
++#include "notation/inotationaccessibility.h"
++#include "notation/inotationstyle.h" // IWYU pragma: keep
++#include "notation/inotationundostack.h" // IWYU pragma: keep
++#include "notation/inotationviewstate.h" // IWYU pragma: keep
++#include "notationscene/notationcommands.h"
++
+ #include "defer.h"
+ #include "log.h"
+ 
+diff --git a/src/web/appshell/view/notationstatusbarmodel.h b/src/web/appshell/view/notationstatusbarmodel.h
+index f2bc3731..6b1c7b0f 100644
+--- a/src/web/appshell/view/notationstatusbarmodel.h
++++ b/src/web/appshell/view/notationstatusbarmodel.h
+@@ -36,7 +36,7 @@
+ #include "ui/iuiactionsregister.h"
+ #include "workspace/iworkspaceconfiguration.h"
+ #include "notation/inotationconfiguration.h"
+-#include "context/iprojectsession.h"
++#include "project/iprojectsession.h"
+ 
+ #include "global/iglobalconfiguration.h"
+ 
+@@ -59,7 +59,7 @@ class NotationStatusBarModel : public QObject, public QQmlParserStatus, public m
+     muse::GlobalInject<muse::workspace::IWorkspaceConfiguration> workspaceConfiguration;
+     muse::GlobalInject<notation::INotationConfiguration> notationConfiguration;
+     muse::GlobalInject<muse::IGlobalConfiguration> globalConfiguration;
+-    muse::ContextInject<context::IProjectSession> context = { this };
++    muse::ContextInject<mu::project::IProjectSession> context = { this };
+     muse::ContextInject<muse::actions::IActionsDispatcher> dispatcher = { this };
+     muse::ContextInject<muse::ui::IUiActionsRegister> actionsRegister = { this };
+ 
+diff --git a/src/web/audioengine/CMakeLists.txt b/src/web/audioengine/CMakeLists.txt
+index 6a32d6ce..503d7a5d 100644
+--- a/src/web/audioengine/CMakeLists.txt
++++ b/src/web/audioengine/CMakeLists.txt
+@@ -22,7 +22,7 @@ cmake_minimum_required(VERSION 3.22)
+ 
+ project(MuseAudio LANGUAGES C CXX)
+ 
+-set(CMAKE_CXX_STANDARD 17)
++set(CMAKE_CXX_STANDARD 20)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ 
+ option(MUSE_MODULE_AUDIO_WORKER "Enable audio worker" OFF)
+@@ -30,8 +30,19 @@ option(MUSE_FIX_MUSEAUDIO_FILENAME "Fix MuseAudio.js file name" OFF)
+ 
+ # src/web/audioengine
+ set(MU_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../..)
++if (EXISTS ${MU_ROOT}/muse/framework/audio)
++    # new layout: <repo>/muse/framework
++    set(MU_ROOT ${MU_ROOT}/muse)
++    set(MUSE_FRAMEWORK_SRC_PATH ${MU_ROOT}/framework)
++    set(AUDIO_ROOT ${MU_ROOT}/framework/audio)
++    set(_muse_fw_cmake ${MU_ROOT}/framework/cmake)
++else()
++    # legacy layout: framework root is the repo itself, sources in src/framework
++    set(MUSE_FRAMEWORK_SRC_PATH ${MU_ROOT}/src/framework)
++    set(AUDIO_ROOT ${MU_ROOT}/src/framework/audio)
++    set(_muse_fw_cmake ${MU_ROOT}/src/framework/cmake)
++endif()
+ set(MUSE_FRAMEWORK_PATH ${MU_ROOT})
+-set(MUSE_FRAMEWORK_SRC_PATH ${MU_ROOT}/src/framework)
+ 
+ if (NOT EXISTS ${MU_ROOT}/buildscripts)
+     message(FATAL_ERROR "not root: ${MU_ROOT}")
+@@ -41,11 +52,12 @@ set(CMAKE_MODULE_PATH
+     ${MU_ROOT}
+     ${MU_ROOT}/buildscripts
+     ${MU_ROOT}/buildscripts/cmake
+-    ${MU_ROOT}/src/framework/cmake
++    ${_muse_fw_cmake}
+     ${CMAKE_MODULE_PATH}
+     )
+ 
+ 
++include(GetPlatformInfo)
+ include(MuseCreateModule)
+ include(SetupCompileWarnings)
+ include(GetBuildType)
+@@ -61,13 +73,36 @@ else()
+     set(EMCC_LINKER_FLAGS -Os)
+ endif()
+ 
+-set(AUDIO_ROOT ${MU_ROOT}/src/framework/audio)
++set(AUDIO_ROOT ${AUDIO_ROOT})
++
++# The audio engine is built without Qt. These must be set before any
++# add_subdirectory() so every target in the tree inherits them.
++add_definitions(-DNO_QT_SUPPORT)
++add_definitions(-DQ_OS_WASM)
++# driver callback mode (same as the app-web configuration); used by
++# muse_framework_config.h, so it must be a CMake variable, not a -D flag.
++set(MUSE_MODULE_AUDIO_WORKMODE 2)
++set(GLOBAL_NO_INTERNAL ON)
++
++# Single-header third-party deps. Prefer sources already fetched by the main build
++# (build.release/_deps); fall back to a vendored include dir if one exists.
++set(_repo_root "${CMAKE_CURRENT_LIST_DIR}/../../..")
++foreach(_dep_inc
++        "${_repo_root}/build.release/_deps/utfcpp/utfcpp/source"
++        "${_repo_root}/build.release/_deps/picojson/picojson"
++        "${_repo_root}/build.release/_deps/pugixml/pugixml/src"
++        "${_repo_root}/build.release/_deps")
++    if (EXISTS "${_dep_inc}")
++        include_directories("${_dep_inc}")
++    endif()
++endforeach()
++
++configure_file(${_muse_fw_cmake}/muse_framework_config.h.in muse_framework_config.h )
++
+ add_subdirectory(${AUDIO_ROOT}/common common)
+ set(WEBWORKER_FACADE_MODE OFF)
+ add_subdirectory(${AUDIO_ROOT}/engine engine)
+ 
+-target_link_libraries(MuseAudio PRIVATE muse_audio_common muse_audio_engine)
+-
+ add_executable(MuseAudio
+     ${CMAKE_CURRENT_LIST_DIR}/engine_export.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/webaudioengine.cpp
+@@ -77,6 +112,8 @@ add_executable(MuseAudio
+     ${AUDIO_ROOT}/driver/platform/web/webaudiochannel.h
+ )
+ 
++target_link_libraries(MuseAudio PRIVATE muse_audio_common muse_audio_engine)
++
+ target_include_directories(MuseAudio PRIVATE
+     ${PROJECT_BINARY_DIR}
+     ${CMAKE_CURRENT_BINARY_DIR}
+@@ -96,13 +133,18 @@ target_include_directories(MuseAudio PRIVATE
+     # end compat
+ )
+ 
+-add_definitions(-DNO_QT_SUPPORT)
+-add_definitions(-DQ_OS_WASM)
+-set(GLOBAL_NO_INTERNAL ON)
+-
+-configure_file(${MU_ROOT}/src/framework/cmake/muse_framework_config.h.in muse_framework_config.h )
++# The framework's global module links against these; provide them from the
++# main build's fetched sources when building the audio engine standalone.
++if (NOT TARGET utfcpp)
++    add_library(utfcpp INTERFACE)
++    target_include_directories(utfcpp INTERFACE "${_repo_root}/build.release/_deps/utfcpp/utfcpp/source")
++endif()
++if (NOT TARGET pugixml)
++    add_library(pugixml STATIC "${_repo_root}/build.release/_deps/pugixml/pugixml/src/pugixml.cpp")
++    target_include_directories(pugixml PUBLIC "${_repo_root}/build.release/_deps/pugixml/pugixml/src")
++endif()
+ 
+-add_subdirectory(${MU_ROOT}/src/framework/global global)
++add_subdirectory(${MUSE_FRAMEWORK_SRC_PATH}/global global)
+ 
+ target_link_libraries(MuseAudio PRIVATE
+     embind
+@@ -117,7 +159,7 @@ target_link_options(MuseAudio PRIVATE "SHELL:-s MODULARIZE=1")
+ target_link_options(MuseAudio PRIVATE "SHELL:-s FETCH=1")
+ target_link_options(MuseAudio PRIVATE "SHELL:-s INITIAL_MEMORY=50MB")
+ target_link_options(MuseAudio PRIVATE "SHELL:-s ALLOW_MEMORY_GROWTH=1")
+-target_link_options(MuseAudio PRIVATE "SHELL:-s EXPORTED_RUNTIME_METHODS=ccall,cwrap")
++target_link_options(MuseAudio PRIVATE "SHELL:-s EXPORTED_RUNTIME_METHODS=ccall,cwrap,HEAPU8")
+ target_link_options(MuseAudio PRIVATE "SHELL:-s EXPORTED_FUNCTIONS=[_main,_malloc,_free,_Init,_process]")
+ 
+ if (MUSE_MODULE_AUDIO_WORKER)
+diff --git a/src/web/audioengine/webaudioengine.cpp b/src/web/audioengine/webaudioengine.cpp
+index 4ccdf6d7..84e2f71a 100644
+--- a/src/web/audioengine/webaudioengine.cpp
++++ b/src/web/audioengine/webaudioengine.cpp
+@@ -28,6 +28,9 @@
+ #include "audio/common/rpc/platform/web/webrpcchannel.h"
+ 
+ #include "audio/engine/internal/enginecontroller.h"
++#include "audio/engine/enginesetup.h"
++
++#include "global/async/processevents.h"
+ 
+ #include "log.h"
+ 
+@@ -48,7 +51,7 @@ static std::string moduleName()
+     return "audio_engine";
+ }
+ 
+-static modularity::ModulesIoC* ioc()
++static modularity::ModulesGlobalIoC* ioc()
+ {
+     return modularity::globalIoc();
+ }
+@@ -76,13 +79,17 @@ void WebAudioEngine::init()
+         logger->addDest(new ConsoleLogDest(ll));
+     }
+ 
++    //! Register the audio engine services (configuration, resolvers, engine, ...)
++    m_engineGlobalSetup = std::make_shared<engine::EngineGlobalSetup>();
++    m_engineGlobalSetup->registerExports();
++    m_engineGlobalSetup->resolveImports();
++
+     rpc::set_last_stream_id(100000);
+     m_rpcChannel = std::make_shared<WebRpcChannel>();
+     m_rpcChannel->setupOnEngine();
+     ioc()->registerExport<IRpcChannel>(moduleName(), m_rpcChannel);
+ 
+     m_controller = std::make_shared<EngineController>(m_rpcChannel);
+-    m_controller->registerExports();
+     m_controller->onStartRunning();
+ 
+     LOGI() << "Web audio engine running";
+@@ -90,5 +97,10 @@ void WebAudioEngine::init()
+ 
+ void WebAudioEngine::process(float* stream, unsigned samplesPerChannel)
+ {
++    //! NOTE There is no Qt/app event loop inside the AudioWorklet, so the async
++    //! framework has to be pumped here; otherwise deferred work (promise bodies,
++    //! e.g. ContextPlayer::prepareToPlay) never runs and playback never starts.
++    muse::async::processMessages();
++
+     m_controller->process(stream, samplesPerChannel);
+ }
+diff --git a/src/web/audioengine/webaudioengine.h b/src/web/audioengine/webaudioengine.h
+index dc601d5a..5f23ce05 100644
+--- a/src/web/audioengine/webaudioengine.h
++++ b/src/web/audioengine/webaudioengine.h
+@@ -33,6 +33,7 @@ class IRpcChannel;
+ 
+ namespace muse::audio::engine {
+ class EngineController;
++class EngineGlobalSetup;
+ class WebAudioEngine
+ {
+ public:
+@@ -45,6 +46,7 @@ public:
+ private:
+     WebAudioEngine() = default;
+ 
++    std::shared_ptr<engine::EngineGlobalSetup> m_engineGlobalSetup;
+     std::shared_ptr<rpc::IRpcChannel> m_rpcChannel;
+     std::shared_ptr<engine::EngineController> m_controller;
+ };

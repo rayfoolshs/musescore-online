@@ -1,0 +1,16 @@
+diff --git a/buildtools/build_dependency.cmake b/buildtools/build_dependency.cmake
+index e1a6fee..3b7313f 100644
+--- a/buildtools/build_dependency.cmake
++++ b/buildtools/build_dependency.cmake
+@@ -147,6 +147,11 @@ function(_bd_cmake_build srcdir)
+     set(_initial_cache "")
+     if(BD_DEPENDS_PREFIXES)
+         string(APPEND _initial_cache "set(CMAKE_PREFIX_PATH \"${BD_DEPENDS_PREFIXES}\" CACHE STRING \"\" FORCE)\n")
++        # For cross-compilation (e.g. WASM), the toolchain sets CMAKE_FIND_ROOT_PATH_MODE_* to ONLY,
++        # which makes find_package/find_path/find_library ignore CMAKE_PREFIX_PATH unless those
++        # prefixes are also on the find root. Add them as a cache variable so they persist into
++        # the main CMake scope where find_package runs (a plain list(APPEND) would be lost).
++        string(APPEND _initial_cache "set(CMAKE_FIND_ROOT_PATH \"${BD_DEPENDS_PREFIXES}\" CACHE STRING \"\" FORCE)\n")
+     endif()
+ 
+     if(BD_OS STREQUAL "macos")
